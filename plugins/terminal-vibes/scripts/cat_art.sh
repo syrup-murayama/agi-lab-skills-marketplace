@@ -1,5 +1,5 @@
 #!/bin/bash
-# Random cat ASCII art with color
+# Random cat ASCII art
 
 pick=$((RANDOM % 5))
 
@@ -10,7 +10,7 @@ cat << 'EOF'
    /\_/\
   ( o.o )
    > ^ <
-   meow~
+  にゃ〜ん
 
 EOF
 ;;
@@ -22,7 +22,7 @@ cat << 'EOF'
   (  =^=  )
    (______)
     |||  |||
-   nyaa~
+  にゃにゃ〜
 
 EOF
 ;;
@@ -36,7 +36,7 @@ cat << 'EOF'
     (           )
    ( (  )   (  ) )
   (__(__)___(__)__)
-    purrr~
+    ごろごろ〜
 
 EOF
 ;;
@@ -47,7 +47,7 @@ cat << 'EOF'
   /,`.-'`'    -.  ;-;;,_
  |,4-  ) )-,_. ,\ (  `'-'
 '---''(_/--'  `-'\_)
-  Felix the Cat!
+  フィリックス参上！
 
 EOF
 ;;
@@ -61,7 +61,7 @@ cat << 'EOF'
   || | ||
   || | ||
   "" | ""
-  standing cat!
+  直立ネコ！
 
 EOF
 ;;
