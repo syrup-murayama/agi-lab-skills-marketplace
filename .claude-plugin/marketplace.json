@@ -1,29 +1,39 @@
 {
-  "name": "agi-lab-skills",
+  "name": "murayamas-creative-partner",
   "owner": {
-    "name": "AGI Lab",
-    "email": "kai@tempi.co.jp"
+    "name": "Syrup Murayama",
+    "email": "syrup@muraya.ma"
   },
   "metadata": {
-    "description": "AGIラボの plugin 集と、ハッカソン参加者向け starter template。",
-    "version": "1.1.0"
+    "description": "フォトグラファーやカメラマンの審美眼をAIに継承させ、挑戦の軌跡を物語るクリエイティブ・パートナー・ハブ。",
+    "version": "1.0.0"
   },
   "plugins": [
     {
-      "name": "hackathon-starter",
-      "source": "./plugins/hackathon-starter",
-      "description": "AGIラボハッカソン参加者向けの starter plugin。fork して、自分の skill に置き換えて公開・提出できます。",
+      "name": "aesthetic-shadowing",
+      "source": "./plugins/aesthetic-shadowing",
+      "description": "フォトグラファーの感性を学習するセレクト支援と、開発者の挑戦を記録するChronicler機能を備えたAIエージェント。",
       "version": "0.1.0",
-      "category": "template",
-      "tags": ["starter", "template", "hackathon", "marketplace"]
+      "category": "creative",
+      "tags": [
+        "photography",
+        "creative-tool",
+        "chronicler",
+        "hackathon-2026"
+      ]
     },
     {
       "name": "terminal-vibes",
       "source": "./plugins/terminal-vibes",
-      "description": "Spinning ASCII donuts, cat art, dad jokes, and Matrix rain. Pure terminal fun, no API keys needed.",
+      "description": "開発の合間の息抜きに。ASCIIアートやジョークを提供するユーティリティ。",
       "version": "1.1.0",
       "category": "fun",
-      "tags": ["entertainment", "ascii-art", "terminal", "break-time"]
+      "tags": [
+        "entertainment",
+        "ascii-art",
+        "terminal",
+        "break-time"
+      ]
     }
   ]
 }
