@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 """
-Stage 3: グループ代表カットの A/B 判定 → スタイルルール動的更新
+Stage 3: グループ内トーナメント → ベストショット選出 + スタイルルール学習
 
-処理フロー:
-  1. stage2_groups.csv からグループを読み込む
-  2. 各グループの代表 2 枚（first / last、またはサイズ上位 2 枚）を選出
-  3. Claude API（マルチモーダル）で画像ペアを分析
-  4. ユーザーが A/B を選択 → フィードバックを蓄積
-  5. N 回の比較後、スタイルルールを更新・表示
-  6. 結果を JSON に保存
+設計:
+  各グループで「King of the Hill」トーナメントを実施。
+    champion = shots[0]
+    shot[1] vs champion → 勝者が新 champion
+    shot[2] vs champion → 勝者が新 champion
+    ... → 最終 champion = グループ最良カット
+
+  大グループ（> --max-per-group 枚）は先頭・末尾・均等サンプリングで
+  代表を絞り込んでからトーナメント実施。
+
+レーティング（compute_ratings）:
+  champion            → score 5.0 → ★5
+  runner-up           → score 4.0 → ★4（最終戦敗退）
+  途中敗退（後半 50%） → score 3.0 → ★3
+  途中敗退（前半 50%） → score 2.0 → ★2
+  トーナメント未到達  → score 3.0 → ★3（Stage4 で精査）
+  SOLO                → score 3.0 → ★3（Stage4 で精査）
 
 使い方:
   python judge.py <jpeg_dir> [オプション]
 
 例:
-  python judge.py /path/to/S2_JPEG/ --csv stage2_groups.csv --rounds 10
+  python judge.py /path/to/S2_JPEG/ --csv stage2_groups.csv
+  python judge.py /path/to/S2_JPEG/ --dry-run
 """
 
 import argparse
 import base64
+import csv as _csv
 import json
 import os
 import subprocess
@@ -32,19 +44,49 @@ import anthropic
 
 # ---- 定数 ----
 MODEL = "claude-opus-4-6"
-MAX_IMAGE_PX = 1568          # Claude Vision の推奨上限（長辺）
+DEFAULT_MAX_PER_GROUP = 8   # 大グループでサンプリングする上限枚数
 
 
-# ---- データ ----
+# ---- データ構造 ----
 
 @dataclass
-class Comparison:
+class ShotRecord:
+    """1ショットの情報（Stage2 CSV から）。"""
+    file: str
     group_id: int
-    shot_a: str
-    shot_b: str
-    winner: str      # "A" / "B" / "skip" / "both_bad"
-    reason: str      # Claude の分析テキスト（要約）
-    timestamp: str   = field(default_factory=lambda: datetime.now().isoformat())
+    position: str        # first / last / middle / solo
+    bonus_weight: float
+    person_count: int
+    dt: str              # datetime (ISO)
+
+
+@dataclass
+class Judgment:
+    """1回の A/B 判定結果。"""
+    group_id: int
+    round_num: int       # グループ内の何戦目か（0始まり）
+    shot_a: str          # champion（挑戦される側）
+    shot_b: str          # challenger（挑戦する側）
+    winner: str          # "A" / "B" / "skip"
+    analysis: str        # Claude の分析テキスト（要約）
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class GroupTournament:
+    """グループ単位のトーナメント状態。"""
+    group_id: int
+    shots: list[str]             # 比較順の file 名リスト
+    champion: str = ""           # 現在の champion file
+    defeated: list[dict] = field(default_factory=list)
+    # [{file, round_eliminated, total_rounds}]
+    round_num: int = 0           # 次の対戦番号
+    next_idx: int = 1            # 次の challenger index
+    done: bool = False
+
+    def __post_init__(self):
+        if self.shots and not self.champion:
+            self.champion = self.shots[0]
 
 
 @dataclass
@@ -54,88 +96,112 @@ class StyleRules:
     updated_at: str = ""
 
 
-# ---- 画像ユーティリティ ----
+# ---- Stage2 CSV 読み込み ----
 
-def _encode_image(path: Path) -> tuple[str, str]:
-    """JPEG を base64 エンコードして (data, media_type) を返す。"""
-    with open(path, "rb") as f:
-        data = base64.standard_b64encode(f.read()).decode("utf-8")
-    return data, "image/jpeg"
-
-
-def _open_images(*paths: Path) -> None:
-    """macOS Preview で画像を開く（バックグラウンド）。"""
-    try:
-        subprocess.Popen(
-            ["open", "-a", "Preview"] + [str(p) for p in paths],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(0.5)  # Preview が起動するまで少し待つ
-    except Exception:
-        pass  # プレビュー失敗は無視
-
-
-# ---- グループ選出 ----
-
-def load_groups(csv_path: Path, jpeg_dir: Path) -> list[dict]:
-    """stage2_groups.csv を読み込み、グループごとに代表 2 枚を選出する。
-
-    Returns:
-        list of {group_id, shot_a_path, shot_b_path, group_size}
-    """
-    import csv
-
-    by_group: dict[int, list[dict]] = {}
+def load_all_shots(csv_path: Path) -> dict[int, list[ShotRecord]]:
+    """stage2_groups.csv を全行読み込み、グループID → ショットリスト を返す。"""
+    by_group: dict[int, list[ShotRecord]] = {}
     with open(csv_path, encoding="utf-8") as f:
-        for row in csv.DictReader(f):
+        for row in _csv.DictReader(f):
             gid = int(row["group_id"])
-            by_group.setdefault(gid, []).append(row)
+            by_group.setdefault(gid, []).append(ShotRecord(
+                file=row["file"],
+                group_id=gid,
+                position=row["position"],
+                bonus_weight=float(row["bonus_weight"]),
+                person_count=int(float(row["person_count"])),
+                dt=row["datetime"],
+            ))
+    # 各グループを時刻順にソート
+    for members in by_group.values():
+        members.sort(key=lambda s: (s.dt, s.file))
+    return by_group
 
-    candidates = []
+
+def sample_shots(members: list[ShotRecord], max_n: int) -> list[ShotRecord]:
+    """グループから代表ショットを最大 max_n 枚サンプリング。
+
+    優先順位: first, last, 均等サンプリングした middle
+    """
+    if len(members) <= max_n:
+        return members
+
+    firsts  = [s for s in members if s.position == "first"]
+    lasts   = [s for s in members if s.position == "last"]
+    middles = [s for s in members if s.position == "middle"]
+
+    selected = list(firsts) + list(lasts)
+    remaining = max_n - len(selected)
+
+    if remaining > 0 and middles:
+        step = max(1, len(middles) // remaining)
+        selected += middles[::step][:remaining]
+
+    # 重複除去 → 時刻順
+    seen = set()
+    result = []
+    for s in members:  # 元の時刻順を保持
+        if s.file not in seen and s in selected:
+            result.append(s)
+            seen.add(s.file)
+
+    return result[:max_n]
+
+
+def build_tournaments(
+    by_group: dict[int, list[ShotRecord]],
+    max_per_group: int,
+    jpeg_dir: Path,
+) -> list[GroupTournament]:
+    """グループごとにトーナメントオブジェクトを生成（SOLO グループは除外）。"""
+    tournaments = []
     for gid, members in sorted(by_group.items()):
         if len(members) < 2:
             continue  # SOLO はスキップ
 
-        # first / last を優先。どちらもなければ先頭 2 枚
-        firsts = [m for m in members if m["position"] == "first"]
-        lasts  = [m for m in members if m["position"] == "last"]
-        if firsts and lasts:
-            shot_a = firsts[0]
-            shot_b = lasts[0]
-        else:
-            shot_a, shot_b = members[0], members[-1]
-
-        path_a = jpeg_dir / shot_a["file"]
-        path_b = jpeg_dir / shot_b["file"]
-        if not path_a.exists() or not path_b.exists():
+        sampled = sample_shots(members, max_per_group)
+        # 画像ファイルが実在するものだけ
+        valid = [s for s in sampled if (jpeg_dir / s.file).exists()]
+        if len(valid) < 2:
             continue
 
-        candidates.append({
-            "group_id":   gid,
-            "group_size": len(members),
-            "shot_a":     shot_a["file"],
-            "shot_b":     shot_b["file"],
-            "path_a":     path_a,
-            "path_b":     path_b,
-        })
+        tournaments.append(GroupTournament(
+            group_id=gid,
+            shots=[s.file for s in valid],
+            champion=valid[0].file,
+        ))
 
-    return candidates
+    return tournaments
 
 
-# ---- Claude API ----
+# ---- 画像ユーティリティ ----
+
+def _encode(path: Path) -> str:
+    with open(path, "rb") as f:
+        return base64.standard_b64encode(f.read()).decode("utf-8")
+
+
+def _open_preview(*paths: Path) -> None:
+    try:
+        subprocess.Popen(
+            ["open", "-a", "Preview"] + [str(p) for p in paths],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        time.sleep(0.4)
+    except Exception:
+        pass
+
+
+# ---- Claude 分析 ----
 
 def analyze_pair(
     client: anthropic.Anthropic,
     path_a: Path,
     path_b: Path,
     style_rules: StyleRules,
+    label_a: str = "A（現チャンピオン）",
+    label_b: str = "B（挑戦者）",
 ) -> str:
-    """2 枚の画像をマルチモーダルで分析し、差異と推奨をストリーミング出力する。"""
-
-    data_a, media_a = _encode_image(path_a)
-    data_b, media_b = _encode_image(path_b)
-
     rules_text = ""
     if style_rules.rules:
         rules_text = "\n\n【現在のスタイルルール】\n" + "\n".join(
@@ -144,33 +210,29 @@ def analyze_pair(
 
     system = (
         "あなたはプロフォトグラファーのアシスタントです。"
-        "2 枚の写真（A と B）を比較し、技術的・美的観点から違いを分析してください。"
-        "観点例: ピント・ブレ・露出・表情・構図・自然さ・瞬間のクオリティ。"
-        "分析は日本語で、簡潔に 200 字以内でまとめてください。"
-        "最後に「→ 推奨: A / B / 差なし」の形式で1行追加してください。"
+        "2 枚の写真を比較し、技術・美的観点から違いを 150 字以内で分析してください。"
+        "観点例: ピント・ブレ・露出・表情・構図・瞬間の質。"
+        "最後に「→ 推奨: A / B / 差なし」を 1 行で追加してください。"
         + rules_text
     )
 
-    print("\n[Claude が分析中...]", flush=True)
-
+    print(f"\n  [Claude 分析中...]", flush=True)
     result = []
     with client.messages.stream(
         model=MODEL,
-        max_tokens=512,
+        max_tokens=400,
         system=system,
         messages=[{
             "role": "user",
             "content": [
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_a, "data": data_a},
-                },
-                {"type": "text", "text": "【写真 A】"},
-                {
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_b, "data": data_b},
-                },
-                {"type": "text", "text": "【写真 B】\nこの 2 枚を比較してください。"},
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": "image/jpeg",
+                            "data": _encode(path_a)}},
+                {"type": "text", "text": f"【{label_a}】"},
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": "image/jpeg",
+                            "data": _encode(path_b)}},
+                {"type": "text", "text": f"【{label_b}】\nこの 2 枚を比較してください。"},
             ],
         }],
     ) as stream:
@@ -184,338 +246,396 @@ def analyze_pair(
 
 def update_style_rules(
     client: anthropic.Anthropic,
-    comparisons: list[Comparison],
-    current_rules: StyleRules,
+    judgments: list[Judgment],
+    current: StyleRules,
 ) -> StyleRules:
-    """蓄積したフィードバックからスタイルルールを更新する。"""
-
-    feedback_text = "\n".join(
-        f"グループ{c.group_id}: {c.shot_a} vs {c.shot_b} → 選択={c.winner} / 分析={c.reason}"
-        for c in comparisons
+    feedback = "\n".join(
+        f"G{j.group_id}-R{j.round_num}: {j.shot_a} vs {j.shot_b} "
+        f"→ 勝者={j.winner} / {j.analysis[:80]}"
+        for j in judgments if j.winner in ("A", "B")
     )
-    current_rules_text = "\n".join(f"- {r}" for r in current_rules.rules) or "（まだルールなし）"
+    cur_rules = "\n".join(f"- {r}" for r in current.rules) or "（まだルールなし）"
 
-    print("\n[スタイルルールを更新中...]", flush=True)
-
+    print("\n  [スタイルルール更新中...]", flush=True)
+    result = []
     with client.messages.stream(
         model=MODEL,
-        max_tokens=1024,
+        max_tokens=800,
         system=(
-            "あなたはプロフォトグラファーの審美眼を学習するAIアシスタントです。"
-            "ユーザーの A/B 選択履歴を分析し、このフォトグラファーの好みのパターンを"
-            "簡潔な日本語ルールとして 3〜7 個に整理してください。"
+            "ユーザーの写真選択履歴からフォトグラファーの好みのパターンを"
+            "3〜7 個の日本語ルールに整理してください。"
             "形式: JSON { \"summary\": \"...\", \"rules\": [\"...\", ...] }"
         ),
         messages=[{
             "role": "user",
             "content": (
-                f"【現在のルール】\n{current_rules_text}\n\n"
-                f"【新しいフィードバック】\n{feedback_text}\n\n"
-                "ルールを更新してください（JSON のみ出力）。"
+                f"【現在のルール】\n{cur_rules}\n\n"
+                f"【新しい判定履歴】\n{feedback}\n\n"
+                "ルールを更新してください（JSON のみ）。"
             ),
         }],
     ) as stream:
-        raw = "".join(stream.text_stream)
+        for text in stream.text_stream:
+            result.append(text)
 
-    # JSON を抽出
+    raw = "".join(result)
     try:
-        # コードブロック除去
         clean = raw.strip()
         if clean.startswith("```"):
             clean = clean.split("```")[1]
             if clean.startswith("json"):
                 clean = clean[4:]
         parsed = json.loads(clean.strip())
-        rules = StyleRules(
+        updated = StyleRules(
             summary=parsed.get("summary", ""),
             rules=parsed.get("rules", []),
             updated_at=datetime.now().isoformat(),
         )
-        print("\n📋 スタイルルール更新:")
-        print(f"  {rules.summary}")
-        for r in rules.rules:
-            print(f"  ・{r}")
-        return rules
+        print("\n  📋 スタイルルール更新:")
+        print(f"    {updated.summary}")
+        for r in updated.rules:
+            print(f"    ・{r}")
+        return updated
     except Exception as e:
-        print(f"\n(ルール更新失敗: {e})")
-        return current_rules
+        print(f"\n  (ルール更新失敗: {e})")
+        return current
 
 
 # ---- レーティング計算 ----
 
 def compute_ratings(
-    comparisons: list[Comparison],
-    csv_path: Path,
+    tournaments: list[GroupTournament],
+    by_group: dict[int, list[ShotRecord]],
 ) -> list[dict]:
-    """A/B 判定結果を全ショットのレーティングスコアに変換する。
+    """トーナメント結果を全ショットのスコアに変換する。
 
-    スコア設計（0.0〜5.0）:
-      base = bonus_weight（Stage 2 由来: 1.0〜1.5）
-      A/B 勝者   : base × 2.5  → ~3.5〜3.75（★3〜4 相当）
-      A/B 敗者   : base × 1.5  → ~1.5〜2.25（★1〜2 相当）
-      both_bad   : base × 0.5  → 却下候補
-      middle     : base × 1.8  → ~1.8〜2.7（★2 相当、Stage4で精査）
-      solo       : base × 2.0  → ~2.0〜3.0（★2〜3 相当、Stage4で精査）
-      skip(未判定): base × 2.0 → solo と同扱い
+    トーナメント参加ショットのスコア:
+      champion:             5.0
+      runner-up:            4.0  （最終戦で負けた）
+      敗退（後半 50%）:     3.0
+      敗退（前半 50%）:     2.0
 
-    Returns:
-        list of {file, group_id, position, bonus_weight,
-                 stage3_verdict, rating_score, rating_stars}
+    トーナメント未参加:
+      SOLO:                 3.0
+      グループ内未サンプル: 3.0  （Stage4 で精査）
     """
-    import csv as _csv
+    # トーナメント結果をファイル名でルックアップできるようにする
+    # {file: score}
+    score_map: dict[str, float] = {}
 
-    # Stage2 CSV を全読み込み
-    all_shots: list[dict] = []
-    with open(csv_path, encoding="utf-8") as f:
-        for row in _csv.DictReader(f):
-            all_shots.append({
-                "file":         row["file"],
-                "group_id":     int(row["group_id"]),
-                "position":     row["position"],
-                "bonus_weight": float(row["bonus_weight"]),
-                "datetime":     row["datetime"],
-            })
+    for t in tournaments:
+        total_rounds = len(t.shots) - 1
+        if total_rounds == 0:
+            continue
 
-    # 判定結果をグループID→(winner_file, loser_file, verdict)でマップ
-    verdict_map: dict[int, dict] = {}
-    for c in comparisons:
-        if c.winner == "A":
-            verdict_map[c.group_id] = {"winner": c.shot_a, "loser": c.shot_b, "result": "judged"}
-        elif c.winner == "B":
-            verdict_map[c.group_id] = {"winner": c.shot_b, "loser": c.shot_a, "result": "judged"}
-        elif c.winner == "both_bad":
-            verdict_map[c.group_id] = {"winner": None, "loser": None, "result": "both_bad"}
-        # "skip" は verdict_map に入れない（未判定扱い）
+        # champion
+        score_map[t.champion] = 5.0
 
-    results = []
-    for shot in all_shots:
-        gid      = shot["group_id"]
-        pos      = shot["position"]
-        bw       = shot["bonus_weight"]
-        fname    = shot["file"]
-        verdict  = "pending"
-
-        if pos == "solo":
-            score   = bw * 2.0
-            verdict = "solo"
-        elif gid not in verdict_map:
-            # 未判定グループ（skip or rounds 未到達）
-            score   = bw * 2.0
-            verdict = "pending"
-        else:
-            vm = verdict_map[gid]
-            if vm["result"] == "both_bad":
-                score   = bw * 0.5
-                verdict = "both_bad"
-            elif pos in ("first", "last"):
-                if fname == vm["winner"]:
-                    score   = bw * 2.5
-                    verdict = "winner"
-                else:
-                    score   = bw * 1.5
-                    verdict = "loser"
+        # defeated
+        for d in t.defeated:
+            r = d["round_eliminated"]
+            # 後半か前半か（0始まり）
+            if r >= total_rounds * 0.5:
+                score_map[d["file"]] = 3.0
             else:
-                # middle: グループが判定済みでも個別スコアは Stage4 に委ねる
-                score   = bw * 1.8
-                verdict = "middle_pending"
+                score_map[d["file"]] = 2.0
 
-        stars = min(5, max(0, round(score)))
-        results.append({
-            "file":          fname,
-            "group_id":      gid,
-            "position":      pos,
-            "bonus_weight":  bw,
-            "stage3_verdict": verdict,
-            "rating_score":  round(score, 3),
-            "rating_stars":  stars,
-            "datetime":      shot["datetime"],
-        })
+        # runner-up = 最後に負けた shot
+        if t.defeated:
+            last_d = max(t.defeated, key=lambda d: d["round_eliminated"])
+            if last_d["round_eliminated"] == total_rounds - 1:
+                score_map[last_d["file"]] = 4.0
+
+    # 全ショットにスコアを付与
+    results = []
+    for gid, members in sorted(by_group.items()):
+        for shot in members:
+            score = score_map.get(shot.file, 3.0)
+            results.append({
+                "file":          shot.file,
+                "group_id":      gid,
+                "position":      shot.position,
+                "bonus_weight":  shot.bonus_weight,
+                "rating_score":  score,
+                "rating_stars":  min(5, max(1, round(score))),
+                "datetime":      shot.dt,
+            })
 
     return sorted(results, key=lambda r: (r["group_id"], r["datetime"], r["file"]))
 
 
-def print_dry_run(candidates: list[dict], csv_path: Path) -> None:
-    """--dry-run: API を呼ばずにペア選出とレーティング設計を表示する。"""
-    import csv as _csv
+# ---- dry-run 表示 ----
 
-    # Stage2 全データ
-    all_shots: list[dict] = []
-    with open(csv_path, encoding="utf-8") as f:
-        for row in _csv.DictReader(f):
-            all_shots.append(row)
+def print_dry_run(
+    tournaments: list[GroupTournament],
+    by_group: dict[int, list[ShotRecord]],
+) -> None:
+    total_rounds = sum(len(t.shots) - 1 for t in tournaments)
+    total_shots  = sum(len(m) for m in by_group.values())
+    solo_count   = sum(1 for m in by_group.values() if len(m) == 1)
 
-    print("\n━━━  A/B ペア選出ロジック（dry-run）  ━━━\n")
-    print(f"{'GID':>4}  {'枚':>3}  {'A = first':28}  {'B = last':28}  {'middle':>6}")
+    print(f"\n{'━'*60}")
+    print(f"  グループ数: {len(by_group)}  /  総ショット: {total_shots}")
+    print(f"  SOLO（除外）: {solo_count}  /  トーナメント対象: {len(tournaments)} グループ")
+    print(f"  総対戦数: {total_rounds} 回")
+    print(f"{'━'*60}\n")
+
+    print(f"{'GID':>4}  {'元枚':>3}  {'対象':>3}  {'対戦':>3}  "
+          f"{'shots（トーナメント順）'}")
     print("─" * 78)
-    for c in candidates:
-        mid = c["group_size"] - 2
-        print(
-            f"{c['group_id']:>4}  {c['group_size']:>3}枚  "
-            f"{c['shot_a']:28}  {c['shot_b']:28}  +{mid}枚"
-        )
+    for t in tournaments:
+        orig = len(by_group[t.group_id])
+        n    = len(t.shots)
+        rounds = n - 1
+        shots_preview = " → ".join(s.replace(".JPG", "") for s in t.shots[:4])
+        if n > 4:
+            shots_preview += f" → ...（+{n-4}）"
+        print(f"{t.group_id:>4}  {orig:>3}枚  {n:>3}枚  {rounds:>3}戦  {shots_preview}")
 
-    print(f"\n→ 比較対象: {len(candidates)} グループ")
-    print("→ 選出規則: 各グループの position=first を A、position=last を B に割り当て")
-    print("            （first/last が存在しない場合は時刻順の先頭/末尾）\n")
+    print(f"\n  合計: {total_rounds} 対戦（1対戦あたり約 10〜20 秒）")
+    print(f"  推定所要時間: {total_rounds * 15 // 60} 分 {total_rounds * 15 % 60} 秒\n")
 
-    print("━━━  レーティング設計（仮: 全グループ A 勝利と仮定）  ━━━\n")
-    print(f"{'verdict':>14}  {'乗数':>5}  {'スコア範囲':>14}  {'★変換':>6}  {'説明'}")
-    print("─" * 70)
-    rows_design = [
-        ("winner",         2.5, "1.0×2.5〜1.5×2.5", "★3〜4", "A/B の勝者"),
-        ("loser",          1.5, "1.0×1.5〜1.5×1.5", "★2〜3", "A/B の敗者"),
-        ("both_bad",       0.5, "1.0×0.5〜1.5×0.5", "★1",   "両方却下"),
-        ("middle_pending", 1.8, "1.0×1.8〜1.5×1.8", "★2〜3", "中間カット（Stage4で精査）"),
-        ("solo",           2.0, "1.5×2.0=3.0",      "★3",   "SOLOショット（Stage4）"),
-        ("pending",        2.0, "—",                 "★2〜3", "未判定グループ"),
+    print("━━━  レーティング設計  ━━━\n")
+    print(f"  {'トーナメント結果':>20}  {'スコア':>6}  {'★':>2}  説明")
+    print("  " + "─" * 55)
+    rows = [
+        ("champion",           "5.0", "★5", "グループ最優秀カット"),
+        ("runner-up",          "4.0", "★4", "最終戦で champion に敗退"),
+        ("後半敗退（50%以降）", "3.0", "★3", "中盤まで勝ち残った"),
+        ("前半敗退（50%未満）", "2.0", "★2", "早期敗退"),
+        ("未サンプル / SOLO",  "3.0", "★3", "Stage4 LLM で個別精査"),
     ]
-    for v, mult, rng, stars, desc in rows_design:
-        print(f"{v:>14}  ×{mult:<4}  {rng:>14}  {stars:>6}  {desc}")
+    for name, score, stars, desc in rows:
+        print(f"  {name:>20}  {score:>6}  {stars:>2}  {desc}")
 
-    # 全 A 勝利シミュレーション
-    sim_comparisons = [
-        Comparison(
-            group_id=c["group_id"],
-            shot_a=c["shot_a"],
-            shot_b=c["shot_b"],
-            winner="A",
-            reason="(dry-run simulation)",
+    # シミュレーション: 全勝 champion = shots[0] と仮定
+    sim_tournaments = []
+    for t in tournaments:
+        st = GroupTournament(
+            group_id=t.group_id,
+            shots=t.shots,
+            champion=t.shots[0],
+            defeated=[
+                {"file": s, "round_eliminated": i, "total_rounds": len(t.shots)-1}
+                for i, s in enumerate(t.shots[1:])
+            ],
+            done=True,
         )
-        for c in candidates
-    ]
-    ratings = compute_ratings(sim_comparisons, csv_path)
+        sim_tournaments.append(st)
 
-    star_dist = {}
+    ratings = compute_ratings(sim_tournaments, by_group)
+    star_dist: dict[int, int] = {}
     for r in ratings:
         s = r["rating_stars"]
         star_dist[s] = star_dist.get(s, 0) + 1
 
-    verdict_dist: dict[str, int] = {}
-    for r in ratings:
-        v = r["stage3_verdict"]
-        verdict_dist[v] = verdict_dist.get(v, 0) + 1
-
-    print("\n━━━  シミュレーション結果（全 A 勝利と仮定 / 330枚）  ━━━\n")
-    print("verdict 分布:")
-    for v, n in sorted(verdict_dist.items()):
-        print(f"  {v:>16}: {n:>3}枚")
-    print("\n★ 分布:")
+    print(f"\n  シミュレーション結果（全グループ shots[0] が champion と仮定）")
+    print(f"  {'★':>2}  {'枚数':>5}  棒グラフ")
     for s in sorted(star_dist.keys()):
-        bar = "█" * star_dist[s]
-        print(f"  ★{s}: {star_dist[s]:>3}枚  {bar}")
+        n = star_dist[s]
+        bar = "█" * min(n, 50)
+        print(f"  ★{s}  {n:>5}枚  {bar}")
 
-    print("\n━━━  実際の動作フロー  ━━━\n")
-    print("  [A/B判定 N回]")
-    print("    ↓  judge.py がユーザー入力を収集")
-    print("    ↓  N回ごとに Claude でスタイルルール抽出")
-    print("    ↓  stage3_results.json に蓄積")
-    print("")
-    print("  [レーティング計算 = compute_ratings()]")
-    print("    ↓  winner → bonus_weight × 2.5 → ★3〜4")
-    print("    ↓  loser  → bonus_weight × 1.5 → ★1〜2")
-    print("    ↓  middle → bonus_weight × 1.8 → ★2〜3（Stage4 LLM 精査待ち）")
-    print("    ↓  solo   → bonus_weight × 2.0 → ★3（Stage4 LLM 精査待ち）")
-    print("")
-    print("  [Stage 4（未実装）]")
-    print("    → middle/solo/pending を Claude がスタイルルールに基づきバッチ評価")
-    print("    → XMP Sidecar 書き出し → Lightroom に取り込み")
+    print(f"\n━━━  実際の動作フロー  ━━━\n")
+    print("  各グループ: shots[0] が最初の champion")
+    print("  shots[1] vs champion → 勝者が新 champion")
+    print("  shots[2] vs champion → 勝者が新 champion  ...")
+    print("  → 最終 champion = グループの最良カット = ★5")
+    print()
+    print("  N 戦ごとに Claude がスタイルルールを更新")
+    print("  全トーナメント完了後 → compute_ratings() → stage3_results.json")
+    print("  Stage4: middle/SOLO を style rules でバッチ評価 → XMP 書き出し")
 
 
-# ---- 対話ループ ----
+# ---- 対話セッション ----
 
 def run_session(
     client: anthropic.Anthropic,
-    candidates: list[dict],
-    rounds: int,
+    tournaments: list[GroupTournament],
+    by_group: dict[int, list[ShotRecord]],
+    jpeg_dir: Path,
     output_path: Path,
     update_every: int,
 ) -> None:
-    """メイン対話セッション。"""
-
-    # 既存セッションのロード
-    comparisons: list[Comparison] = []
+    judgments: list[Judgment] = []
     style_rules = StyleRules()
 
+    # 前回セッション復元
     if output_path.exists():
         try:
             saved = json.loads(output_path.read_text(encoding="utf-8"))
-            comparisons = [Comparison(**c) for c in saved.get("comparisons", [])]
+            judgments = [Judgment(**j) for j in saved.get("judgments", [])]
             sr = saved.get("style_rules", {})
             style_rules = StyleRules(**sr) if sr else StyleRules()
-            done_groups = {c.group_id for c in comparisons}
-            candidates = [c for c in candidates if c["group_id"] not in done_groups]
-            print(f"前回セッションを継続: {len(comparisons)} 件完了済み、残り {len(candidates)} グループ")
-        except Exception:
-            pass
 
-    if not candidates:
-        print("比較するグループがありません。")
+            # 復元: 完了済みトーナメントとラウンドを再現
+            for j in judgments:
+                t = next((t for t in tournaments if t.group_id == j.group_id), None)
+                if not t:
+                    continue
+                if j.winner in ("A", "B"):
+                    champ_wins = (j.winner == "A")
+                    challenger = t.shots[t.next_idx] if t.next_idx < len(t.shots) else None
+                    if challenger is None:
+                        continue
+                    if not champ_wins:
+                        t.defeated.append({
+                            "file": t.champion,
+                            "round_eliminated": t.round_num,
+                            "total_rounds": len(t.shots) - 1,
+                        })
+                        t.champion = challenger
+                    else:
+                        t.defeated.append({
+                            "file": challenger,
+                            "round_eliminated": t.round_num,
+                            "total_rounds": len(t.shots) - 1,
+                        })
+                    t.round_num += 1
+                    t.next_idx += 1
+                elif j.winner == "skip":
+                    t.next_idx += 1
+                    t.round_num += 1
+                if t.next_idx >= len(t.shots):
+                    t.done = True
+
+            n_done = sum(1 for t in tournaments if t.done)
+            print(f"前回セッション復元: 判定 {len(judgments)} 件 / "
+                  f"グループ完了 {n_done}/{len(tournaments)}")
+        except Exception as e:
+            print(f"(復元失敗: {e}、新規スタート)")
+
+    pending = [t for t in tournaments if not t.done]
+    if not pending:
+        print("すべてのトーナメントが完了済みです。")
+        _save(output_path, judgments, style_rules, tournaments, by_group)
         return
 
-    total = min(rounds, len(candidates))
-    print(f"\n=== Stage 3: A/B 判定セッション ({total} 回) ===")
-    print("コマンド: A / B / s (スキップ) / x (終了)\n")
+    total_remaining = sum(len(t.shots) - 1 - t.round_num for t in pending)
+    print(f"\n=== Stage 3: トーナメント対戦セッション ===")
+    print(f"残り対戦数: {total_remaining}  /  グループ: {len(pending)} 個")
+    print("コマンド: A (champion 勝ち) / B (challenger 勝ち) / s (スキップ) / x (終了)\n")
 
-    for i, cand in enumerate(candidates[:total]):
-        gid        = cand["group_id"]
-        group_size = cand["group_size"]
-        path_a     = cand["path_a"]
-        path_b     = cand["path_b"]
+    judged_count = 0
 
-        print(f"─── [{i + 1}/{total}] グループ {gid}（{group_size} 枚）───")
-        print(f"  A: {cand['shot_a']}")
-        print(f"  B: {cand['shot_b']}")
+    for t in pending:
+        orig_size = len(by_group[t.group_id])
+        print(f"\n{'═'*60}")
+        print(f"  グループ {t.group_id}（元 {orig_size} 枚 → トーナメント {len(t.shots)} 枚）")
+        print(f"{'═'*60}")
 
-        # Preview で画像を開く
-        _open_images(path_a, path_b)
-
-        # Claude 分析
-        analysis = analyze_pair(client, path_a, path_b, style_rules)
-
-        # ユーザー入力
-        while True:
-            raw = input("\n  あなたの選択 [A/B/s=skip/x=終了]: ").strip().lower()
-            if raw in ("a", "b", "s", "skip", "x", "exit", "quit"):
+        while not t.done:
+            if t.next_idx >= len(t.shots):
+                t.done = True
                 break
-            print("  A / B / s / x で入力してください。")
 
-        if raw in ("x", "exit", "quit"):
-            print("セッションを終了します。")
-            break
+            challenger = t.shots[t.next_idx]
+            champion   = t.champion
+            round_label = f"第 {t.round_num + 1} 戦 / {len(t.shots) - 1} 戦"
 
-        winner = "A" if raw == "a" else "B" if raw == "b" else "skip"
-        comp = Comparison(
-            group_id=gid,
-            shot_a=cand["shot_a"],
-            shot_b=cand["shot_b"],
-            winner=winner,
-            reason=analysis[:300],  # 保存用に切り詰め
-        )
-        comparisons.append(comp)
+            print(f"\n  [{round_label}]")
+            print(f"  A（champion） : {champion}")
+            print(f"  B（challenger）: {challenger}")
 
-        # 定期的にスタイルルールを更新
-        judged = [c for c in comparisons if c.winner in ("A", "B")]
-        if len(judged) > 0 and len(judged) % update_every == 0:
-            style_rules = update_style_rules(client, judged, style_rules)
+            _open_preview(jpeg_dir / champion, jpeg_dir / challenger)
 
-        # 途中保存
-        _save(output_path, comparisons, style_rules)
-        print()
+            analysis = analyze_pair(
+                client,
+                jpeg_dir / champion,
+                jpeg_dir / challenger,
+                style_rules,
+            )
 
-    # セッション終了後に最終ルール更新
-    judged = [c for c in comparisons if c.winner in ("A", "B")]
-    if judged:
-        style_rules = update_style_rules(client, judged, style_rules)
+            while True:
+                raw = input(
+                    "  選択 [A=champion勝ち / B=challenger勝ち / s=スキップ / x=終了]: "
+                ).strip().lower()
+                if raw in ("a", "b", "s", "skip", "x", "exit"):
+                    break
+                print("  A / B / s / x で入力してください。")
 
-    _save(output_path, comparisons, style_rules)
-    print(f"\n✅ 完了。結果を保存: {output_path}")
-    print(f"   比較数: {len(comparisons)} / 有効判定: {len(judged)}")
+            if raw in ("x", "exit"):
+                print("\nセッションを一時終了します。")
+                _save(output_path, judgments, style_rules, tournaments, by_group)
+                return
+
+            winner_str = "A" if raw == "a" else ("B" if raw == "b" else "skip")
+
+            jdg = Judgment(
+                group_id=t.group_id,
+                round_num=t.round_num,
+                shot_a=champion,
+                shot_b=challenger,
+                winner=winner_str,
+                analysis=analysis[:200],
+            )
+            judgments.append(jdg)
+
+            if winner_str == "B":
+                t.defeated.append({
+                    "file": champion,
+                    "round_eliminated": t.round_num,
+                    "total_rounds": len(t.shots) - 1,
+                })
+                t.champion = challenger
+            elif winner_str == "A":
+                t.defeated.append({
+                    "file": challenger,
+                    "round_eliminated": t.round_num,
+                    "total_rounds": len(t.shots) - 1,
+                })
+            # skip: 現 champion を維持、次へ
+
+            t.round_num += 1
+            t.next_idx += 1
+            judged_count += 1
+
+            if t.next_idx >= len(t.shots):
+                t.done = True
+
+            # スタイルルール更新
+            valid_j = [j for j in judgments if j.winner in ("A", "B")]
+            if len(valid_j) > 0 and len(valid_j) % update_every == 0:
+                style_rules = update_style_rules(client, valid_j, style_rules)
+
+            _save(output_path, judgments, style_rules, tournaments, by_group)
+
+        if t.done:
+            print(f"\n  ✓ グループ {t.group_id} 完了  →  champion: {t.champion}")
+
+    # 最終スタイルルール更新
+    valid_j = [j for j in judgments if j.winner in ("A", "B")]
+    if valid_j:
+        style_rules = update_style_rules(client, valid_j, style_rules)
+
+    _save(output_path, judgments, style_rules, tournaments, by_group)
+    n_done = sum(1 for t in tournaments if t.done)
+    print(f"\n✅ セッション完了: 判定 {judged_count} 件 / グループ {n_done}/{len(tournaments)} 完了")
+    print(f"   結果: {output_path}")
 
 
-def _save(path: Path, comparisons: list[Comparison], rules: StyleRules) -> None:
+def _save(
+    path: Path,
+    judgments: list[Judgment],
+    rules: StyleRules,
+    tournaments: list[GroupTournament],
+    by_group: dict[int, list[ShotRecord]],
+) -> None:
+    ratings = compute_ratings(tournaments, by_group)
     data = {
-        "comparisons": [asdict(c) for c in comparisons],
+        "judgments":   [asdict(j) for j in judgments],
         "style_rules": asdict(rules),
+        "ratings":     ratings,
+        "tournaments": [
+            {
+                "group_id":  t.group_id,
+                "shots":     t.shots,
+                "champion":  t.champion,
+                "defeated":  t.defeated,
+                "done":      t.done,
+            }
+            for t in tournaments
+        ],
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -524,59 +644,57 @@ def _save(path: Path, comparisons: list[Comparison], rules: StyleRules) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Stage 3: A/B 判定でスタイルルールを学習",
+        description="Stage 3: グループ内トーナメントでベストショット選出",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("jpeg_dir",       help="JPEG ディレクトリ")
-    parser.add_argument("--csv",          default="stage2_groups.csv",
-                        help="Stage 2 出力 CSV")
-    parser.add_argument("--output",       default="stage3_results.json",
-                        help="結果 JSON ファイル")
-    parser.add_argument("--rounds",       type=int, default=10,
-                        help="比較回数")
-    parser.add_argument("--update-every", type=int, default=3,
-                        help="N 回判定ごとにスタイルルールを更新")
-    parser.add_argument("--api-key",      default=None,
-                        help="Anthropic API キー（未指定時は ANTHROPIC_API_KEY 環境変数を使用）")
-    parser.add_argument("--dry-run",      action="store_true",
-                        help="API を呼ばずにペア選出・レーティング設計をシミュレーション表示")
+    parser.add_argument("jpeg_dir")
+    parser.add_argument("--csv",           default="stage2_groups.csv")
+    parser.add_argument("--output",        default="stage3_results.json")
+    parser.add_argument("--max-per-group", type=int, default=DEFAULT_MAX_PER_GROUP,
+                        help="大グループで使うサンプル上限枚数")
+    parser.add_argument("--update-every",  type=int, default=5,
+                        help="N 戦ごとにスタイルルールを更新")
+    parser.add_argument("--api-key",       default=None)
+    parser.add_argument("--dry-run",       action="store_true",
+                        help="API 不要。対戦リストとレーティング設計を表示")
     args = parser.parse_args()
 
     jpeg_dir = Path(args.jpeg_dir)
     if not jpeg_dir.exists():
-        print(f"エラー: {jpeg_dir}")
-        sys.exit(1)
+        print(f"エラー: {jpeg_dir}", file=sys.stderr); sys.exit(1)
 
-    # CSV パスを解決（絶対パス or jpeg_dir 親ディレクトリ相対）
     csv_path = Path(args.csv)
     if not csv_path.is_absolute():
         csv_path = jpeg_dir.parent / csv_path
     if not csv_path.exists():
-        print(f"エラー: CSV が見つかりません: {csv_path}")
-        sys.exit(1)
+        print(f"エラー: CSV が見つかりません: {csv_path}", file=sys.stderr); sys.exit(1)
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
         output_path = jpeg_dir.parent / output_path
 
-    # dry-run は API キー不要
+    by_group    = load_all_shots(csv_path)
+    tournaments = build_tournaments(by_group, args.max_per_group, jpeg_dir)
+
+    total_shots = sum(len(m) for m in by_group.values())
+    solo_count  = sum(1 for m in by_group.values() if len(m) == 1)
+
     if args.dry_run:
         print(f"\n=== Aesthetic Shadowing Agent - Stage 3 [DRY-RUN] ===")
         print(f"JPEG: {jpeg_dir}")
         print(f"CSV:  {csv_path}")
-        candidates = load_groups(csv_path, jpeg_dir)
-        print(f"比較可能グループ数: {len(candidates)}\n")
-        print_dry_run(candidates, csv_path)
+        print(f"総ショット: {total_shots}  SOLO: {solo_count}  "
+              f"トーナメント対象: {len(tournaments)} グループ")
+        print_dry_run(tournaments, by_group)
         return
 
-    # API キーの解決（引数 > 環境変数）— ヘッダー出力より先にチェック
+    # API キー確認
     api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print(
-            "エラー: Anthropic API キーが見つかりません。\n"
-            "以下のいずれかで指定してください:\n"
+            "エラー: ANTHROPIC_API_KEY が未設定です。\n"
             "  export ANTHROPIC_API_KEY='sk-ant-...'\n"
-            "  python judge.py ... --api-key sk-ant-...",
+            "  または --api-key オプションで指定してください。",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -584,20 +702,16 @@ def main() -> None:
     print(f"\n=== Aesthetic Shadowing Agent - Stage 3 ===")
     print(f"JPEG: {jpeg_dir}")
     print(f"CSV:  {csv_path}")
-
-    candidates = load_groups(csv_path, jpeg_dir)
-    print(f"比較可能グループ数: {len(candidates)}")
-
-    if not candidates:
-        print("比較できるグループがありません（全グループが SOLO）。")
-        sys.exit(0)
+    print(f"総ショット: {total_shots}  SOLO: {solo_count}  "
+          f"トーナメント: {len(tournaments)} グループ  "
+          f"max/グループ: {args.max_per_group}")
 
     client = anthropic.Anthropic(api_key=api_key)
-
     run_session(
         client=client,
-        candidates=candidates,
-        rounds=args.rounds,
+        tournaments=tournaments,
+        by_group=by_group,
+        jpeg_dir=jpeg_dir,
         output_path=output_path,
         update_every=args.update_every,
     )
