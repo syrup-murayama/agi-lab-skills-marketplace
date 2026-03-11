@@ -241,6 +241,186 @@ def update_style_rules(
         return current_rules
 
 
+# ---- レーティング計算 ----
+
+def compute_ratings(
+    comparisons: list[Comparison],
+    csv_path: Path,
+) -> list[dict]:
+    """A/B 判定結果を全ショットのレーティングスコアに変換する。
+
+    スコア設計（0.0〜5.0）:
+      base = bonus_weight（Stage 2 由来: 1.0〜1.5）
+      A/B 勝者   : base × 2.5  → ~3.5〜3.75（★3〜4 相当）
+      A/B 敗者   : base × 1.5  → ~1.5〜2.25（★1〜2 相当）
+      both_bad   : base × 0.5  → 却下候補
+      middle     : base × 1.8  → ~1.8〜2.7（★2 相当、Stage4で精査）
+      solo       : base × 2.0  → ~2.0〜3.0（★2〜3 相当、Stage4で精査）
+      skip(未判定): base × 2.0 → solo と同扱い
+
+    Returns:
+        list of {file, group_id, position, bonus_weight,
+                 stage3_verdict, rating_score, rating_stars}
+    """
+    import csv as _csv
+
+    # Stage2 CSV を全読み込み
+    all_shots: list[dict] = []
+    with open(csv_path, encoding="utf-8") as f:
+        for row in _csv.DictReader(f):
+            all_shots.append({
+                "file":         row["file"],
+                "group_id":     int(row["group_id"]),
+                "position":     row["position"],
+                "bonus_weight": float(row["bonus_weight"]),
+                "datetime":     row["datetime"],
+            })
+
+    # 判定結果をグループID→(winner_file, loser_file, verdict)でマップ
+    verdict_map: dict[int, dict] = {}
+    for c in comparisons:
+        if c.winner == "A":
+            verdict_map[c.group_id] = {"winner": c.shot_a, "loser": c.shot_b, "result": "judged"}
+        elif c.winner == "B":
+            verdict_map[c.group_id] = {"winner": c.shot_b, "loser": c.shot_a, "result": "judged"}
+        elif c.winner == "both_bad":
+            verdict_map[c.group_id] = {"winner": None, "loser": None, "result": "both_bad"}
+        # "skip" は verdict_map に入れない（未判定扱い）
+
+    results = []
+    for shot in all_shots:
+        gid      = shot["group_id"]
+        pos      = shot["position"]
+        bw       = shot["bonus_weight"]
+        fname    = shot["file"]
+        verdict  = "pending"
+
+        if pos == "solo":
+            score   = bw * 2.0
+            verdict = "solo"
+        elif gid not in verdict_map:
+            # 未判定グループ（skip or rounds 未到達）
+            score   = bw * 2.0
+            verdict = "pending"
+        else:
+            vm = verdict_map[gid]
+            if vm["result"] == "both_bad":
+                score   = bw * 0.5
+                verdict = "both_bad"
+            elif pos in ("first", "last"):
+                if fname == vm["winner"]:
+                    score   = bw * 2.5
+                    verdict = "winner"
+                else:
+                    score   = bw * 1.5
+                    verdict = "loser"
+            else:
+                # middle: グループが判定済みでも個別スコアは Stage4 に委ねる
+                score   = bw * 1.8
+                verdict = "middle_pending"
+
+        stars = min(5, max(0, round(score)))
+        results.append({
+            "file":          fname,
+            "group_id":      gid,
+            "position":      pos,
+            "bonus_weight":  bw,
+            "stage3_verdict": verdict,
+            "rating_score":  round(score, 3),
+            "rating_stars":  stars,
+            "datetime":      shot["datetime"],
+        })
+
+    return sorted(results, key=lambda r: (r["group_id"], r["datetime"], r["file"]))
+
+
+def print_dry_run(candidates: list[dict], csv_path: Path) -> None:
+    """--dry-run: API を呼ばずにペア選出とレーティング設計を表示する。"""
+    import csv as _csv
+
+    # Stage2 全データ
+    all_shots: list[dict] = []
+    with open(csv_path, encoding="utf-8") as f:
+        for row in _csv.DictReader(f):
+            all_shots.append(row)
+
+    print("\n━━━  A/B ペア選出ロジック（dry-run）  ━━━\n")
+    print(f"{'GID':>4}  {'枚':>3}  {'A = first':28}  {'B = last':28}  {'middle':>6}")
+    print("─" * 78)
+    for c in candidates:
+        mid = c["group_size"] - 2
+        print(
+            f"{c['group_id']:>4}  {c['group_size']:>3}枚  "
+            f"{c['shot_a']:28}  {c['shot_b']:28}  +{mid}枚"
+        )
+
+    print(f"\n→ 比較対象: {len(candidates)} グループ")
+    print("→ 選出規則: 各グループの position=first を A、position=last を B に割り当て")
+    print("            （first/last が存在しない場合は時刻順の先頭/末尾）\n")
+
+    print("━━━  レーティング設計（仮: 全グループ A 勝利と仮定）  ━━━\n")
+    print(f"{'verdict':>14}  {'乗数':>5}  {'スコア範囲':>14}  {'★変換':>6}  {'説明'}")
+    print("─" * 70)
+    rows_design = [
+        ("winner",         2.5, "1.0×2.5〜1.5×2.5", "★3〜4", "A/B の勝者"),
+        ("loser",          1.5, "1.0×1.5〜1.5×1.5", "★2〜3", "A/B の敗者"),
+        ("both_bad",       0.5, "1.0×0.5〜1.5×0.5", "★1",   "両方却下"),
+        ("middle_pending", 1.8, "1.0×1.8〜1.5×1.8", "★2〜3", "中間カット（Stage4で精査）"),
+        ("solo",           2.0, "1.5×2.0=3.0",      "★3",   "SOLOショット（Stage4）"),
+        ("pending",        2.0, "—",                 "★2〜3", "未判定グループ"),
+    ]
+    for v, mult, rng, stars, desc in rows_design:
+        print(f"{v:>14}  ×{mult:<4}  {rng:>14}  {stars:>6}  {desc}")
+
+    # 全 A 勝利シミュレーション
+    sim_comparisons = [
+        Comparison(
+            group_id=c["group_id"],
+            shot_a=c["shot_a"],
+            shot_b=c["shot_b"],
+            winner="A",
+            reason="(dry-run simulation)",
+        )
+        for c in candidates
+    ]
+    ratings = compute_ratings(sim_comparisons, csv_path)
+
+    star_dist = {}
+    for r in ratings:
+        s = r["rating_stars"]
+        star_dist[s] = star_dist.get(s, 0) + 1
+
+    verdict_dist: dict[str, int] = {}
+    for r in ratings:
+        v = r["stage3_verdict"]
+        verdict_dist[v] = verdict_dist.get(v, 0) + 1
+
+    print("\n━━━  シミュレーション結果（全 A 勝利と仮定 / 330枚）  ━━━\n")
+    print("verdict 分布:")
+    for v, n in sorted(verdict_dist.items()):
+        print(f"  {v:>16}: {n:>3}枚")
+    print("\n★ 分布:")
+    for s in sorted(star_dist.keys()):
+        bar = "█" * star_dist[s]
+        print(f"  ★{s}: {star_dist[s]:>3}枚  {bar}")
+
+    print("\n━━━  実際の動作フロー  ━━━\n")
+    print("  [A/B判定 N回]")
+    print("    ↓  judge.py がユーザー入力を収集")
+    print("    ↓  N回ごとに Claude でスタイルルール抽出")
+    print("    ↓  stage3_results.json に蓄積")
+    print("")
+    print("  [レーティング計算 = compute_ratings()]")
+    print("    ↓  winner → bonus_weight × 2.5 → ★3〜4")
+    print("    ↓  loser  → bonus_weight × 1.5 → ★1〜2")
+    print("    ↓  middle → bonus_weight × 1.8 → ★2〜3（Stage4 LLM 精査待ち）")
+    print("    ↓  solo   → bonus_weight × 2.0 → ★3（Stage4 LLM 精査待ち）")
+    print("")
+    print("  [Stage 4（未実装）]")
+    print("    → middle/solo/pending を Claude がスタイルルールに基づきバッチ評価")
+    print("    → XMP Sidecar 書き出し → Lightroom に取り込み")
+
+
 # ---- 対話ループ ----
 
 def run_session(
@@ -358,6 +538,8 @@ def main() -> None:
                         help="N 回判定ごとにスタイルルールを更新")
     parser.add_argument("--api-key",      default=None,
                         help="Anthropic API キー（未指定時は ANTHROPIC_API_KEY 環境変数を使用）")
+    parser.add_argument("--dry-run",      action="store_true",
+                        help="API を呼ばずにペア選出・レーティング設計をシミュレーション表示")
     args = parser.parse_args()
 
     jpeg_dir = Path(args.jpeg_dir)
@@ -376,6 +558,16 @@ def main() -> None:
     output_path = Path(args.output)
     if not output_path.is_absolute():
         output_path = jpeg_dir.parent / output_path
+
+    # dry-run は API キー不要
+    if args.dry_run:
+        print(f"\n=== Aesthetic Shadowing Agent - Stage 3 [DRY-RUN] ===")
+        print(f"JPEG: {jpeg_dir}")
+        print(f"CSV:  {csv_path}")
+        candidates = load_groups(csv_path, jpeg_dir)
+        print(f"比較可能グループ数: {len(candidates)}\n")
+        print_dry_run(candidates, csv_path)
+        return
 
     # API キーの解決（引数 > 環境変数）— ヘッダー出力より先にチェック
     api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
