@@ -37,6 +37,8 @@ from PIL import Image, ExifTags
 DEFAULT_TIME_GAP_SEC  = 30    # この秒数を超えたら別シーン候補
 DEFAULT_PHASH_SPLIT   = 18    # pHash ハミング距離がこれ以上 → 分割
 DEFAULT_HIST_SPLIT    = 0.40  # ヒストグラム相関がこれ未満（かつ pHash がグレー） → 分割補強
+DEFAULT_MIN_VISUAL_GAP = 5    # この秒数未満の連続ショットは pHash 分割しない
+DEFAULT_SOLO_MERGE_GAP = 10   # 隣接 SOLO グループをこの秒数以内でマージ
 BONUS_FIRST           = 1.5   # シーン最初の1枚
 BONUS_LAST            = 1.3   # シーン最後の1枚
 BONUS_SOLO            = 1.5   # シーンが1枚だけ（単独ショット）
@@ -157,6 +159,7 @@ def assign_groups(
     time_gap: int,
     phash_thr: int,
     hist_thr: float,
+    min_visual_gap: float = DEFAULT_MIN_VISUAL_GAP,
 ) -> None:
     """shots リストに group_id をインプレースで付与する。"""
     if not shots:
@@ -166,15 +169,69 @@ def assign_groups(
     for i in range(1, len(shots)):
         prev, curr = shots[i - 1], shots[i]
 
+        elapsed = None
         time_break = False
         if prev.dt and curr.dt:
-            time_break = (curr.dt - prev.dt).total_seconds() > time_gap
+            elapsed = (curr.dt - prev.dt).total_seconds()
+            time_break = elapsed > time_gap
 
-        visual_break = _should_split(prev, curr, phash_thr, hist_thr)
+        # 近接ショット（min_visual_gap 秒未満）は視覚変化で分割しない
+        # （同じ被写体を連続撮影している可能性が高い）
+        visual_break = False
+        if elapsed is None or elapsed >= min_visual_gap:
+            visual_break = _should_split(prev, curr, phash_thr, hist_thr)
 
         if time_break or visual_break:
             gid += 1
         curr.group_id = gid
+
+
+def merge_solo_groups(shots: list[Shot], max_gap_sec: float) -> None:
+    """隣接するSOLOグループを時刻差でマージする後処理。
+
+    group_id を再採番し、assign_positions を呼び直す前提で使う。
+    """
+    if max_gap_sec <= 0:
+        return
+
+    by_group: dict[int, list[Shot]] = {}
+    for s in shots:
+        by_group.setdefault(s.group_id, []).append(s)
+
+    # 時刻順にグループIDを並べる
+    group_ids = sorted(
+        by_group.keys(),
+        key=lambda g: (by_group[g][0].dt is None, by_group[g][0].dt or datetime.min),
+    )
+
+    # 古い gid → 新しい gid のマッピングを構築
+    remap: dict[int, int] = {}
+    new_gid = 0
+    i = 0
+    while i < len(group_ids):
+        gid = group_ids[i]
+        remap[gid] = new_gid
+        merged = list(by_group[gid])  # このグループのショット群
+
+        # 次の SOLO グループとマージし続ける
+        while len(merged) == 1 and i + 1 < len(group_ids):
+            next_gid = group_ids[i + 1]
+            next_members = by_group[next_gid]
+            # どちらも dt がある場合のみ時刻差を判定
+            if merged[-1].dt and next_members[0].dt:
+                gap = (next_members[0].dt - merged[-1].dt).total_seconds()
+                if gap <= max_gap_sec:
+                    remap[next_gid] = new_gid
+                    merged.extend(next_members)
+                    i += 1
+                    continue
+            break
+
+        new_gid += 1
+        i += 1
+
+    for s in shots:
+        s.group_id = remap[s.group_id]
 
 
 def assign_positions(shots: list[Shot]) -> None:
@@ -250,11 +307,15 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument('jpeg_dir')
-    parser.add_argument('--output',      default='stage2_groups.csv')
-    parser.add_argument('--time-gap',    type=int,   default=DEFAULT_TIME_GAP_SEC)
-    parser.add_argument('--phash-split', type=int,   default=DEFAULT_PHASH_SPLIT)
-    parser.add_argument('--hist-split',  type=float, default=DEFAULT_HIST_SPLIT)
-    parser.add_argument('--verbose',     action='store_true')
+    parser.add_argument('--output',           default='stage2_groups.csv')
+    parser.add_argument('--time-gap',         type=int,   default=DEFAULT_TIME_GAP_SEC)
+    parser.add_argument('--phash-split',      type=int,   default=DEFAULT_PHASH_SPLIT)
+    parser.add_argument('--hist-split',       type=float, default=DEFAULT_HIST_SPLIT)
+    parser.add_argument('--min-visual-gap',   type=float, default=DEFAULT_MIN_VISUAL_GAP,
+                        help='この秒数未満の連続ショットは pHash 分割しない')
+    parser.add_argument('--solo-merge-gap',   type=float, default=DEFAULT_SOLO_MERGE_GAP,
+                        help='隣接SOLOをこの秒数以内でマージ（0=無効）')
+    parser.add_argument('--verbose',          action='store_true')
     args = parser.parse_args()
 
     jpeg_dir = Path(args.jpeg_dir)
@@ -266,7 +327,9 @@ def main() -> None:
     print(f'対象: {jpeg_dir}')
     print(f'時刻ギャップ: {args.time_gap}s  '
           f'pHash閾値: {args.phash_split}  '
-          f'ヒスト相関閾値: {args.hist_split}')
+          f'ヒスト相関閾値: {args.hist_split}  '
+          f'min_visual_gap: {args.min_visual_gap}s  '
+          f'solo_merge_gap: {args.solo_merge_gap}s')
     print()
 
     detector = PersonDetector()
@@ -280,7 +343,9 @@ def main() -> None:
     # 時刻順ソート（EXIF なしは末尾）
     shots.sort(key=lambda s: (s.dt is None, s.dt or datetime.min, s.stem))
 
-    assign_groups(shots, args.time_gap, args.phash_split, args.hist_split)
+    assign_groups(shots, args.time_gap, args.phash_split, args.hist_split,
+                  args.min_visual_gap)
+    merge_solo_groups(shots, args.solo_merge_gap)
     assign_positions(shots)
 
     n_groups = max(s.group_id for s in shots) + 1
