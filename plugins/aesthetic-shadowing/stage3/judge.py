@@ -153,6 +153,13 @@ HTML_TEMPLATE = """\
     color: #666;
     margin-top: 2px;
   }
+  .rating-btn .rating-label {
+    display: block;
+    font-size: 0.7rem;
+    color: #888;
+    margin-top: 4px;
+    white-space: nowrap;
+  }
   #skip-btn {
     background: transparent;
     border: 1px solid #444;
@@ -214,22 +221,27 @@ HTML_TEMPLATE = """\
     <button class="rating-btn" data-rating="1">
       ★☆☆☆☆
       <span class="key-hint">[ 1 ]</span>
+      <span class="rating-label">絶対に使わない</span>
     </button>
     <button class="rating-btn" data-rating="2">
       ★★☆☆☆
       <span class="key-hint">[ 2 ]</span>
+      <span class="rating-label">不採用</span>
     </button>
     <button class="rating-btn" data-rating="3">
       ★★★☆☆
       <span class="key-hint">[ 3 ]</span>
+      <span class="rating-label">保留</span>
     </button>
     <button class="rating-btn" data-rating="4">
       ★★★★☆
       <span class="key-hint">[ 4 ]</span>
+      <span class="rating-label">採用</span>
     </button>
     <button class="rating-btn" data-rating="5">
       ★★★★★
       <span class="key-hint">[ 5 ]</span>
+      <span class="rating-label">絶対に使う</span>
     </button>
   </div>
   <button id="skip-btn">スキップ &nbsp;[ S ]</button>
