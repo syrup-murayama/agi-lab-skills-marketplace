@@ -46,6 +46,45 @@ fi
 "$VENV" "$(dirname "$0")/stage3/judge.py" "${STAGE3_ARGS[@]}"
 
 echo ""
+
+# Stage 4: 審美眼プロファイル生成（rated_samples.json が存在する場合のみ）
+if [ -f "$OUT_DIR/rated_samples.json" ]; then
+  echo "[Stage 4] 審美眼プロファイル生成..."
+  STAGE4_ARGS=("--rated" "$OUT_DIR/rated_samples.json" "--jpeg-dir" "$JPEG_DIR" "--mode" "text" "--output" "$OUT_DIR/aesthetic_profile.json")
+  if [ -n "$SESSION_JSON" ]; then
+    STAGE4_ARGS+=("--session" "$SESSION_JSON")
+  fi
+  "$VENV" "$(dirname "$0")/stage4/profile.py" "${STAGE4_ARGS[@]}"
+
+  echo ""
+
+  # Stage 5: CLIPバッチスコアリング
+  echo "[Stage 5] CLIPバッチスコアリング..."
+  "$VENV" "$(dirname "$0")/stage5/score.py" \
+    --profile "$OUT_DIR/aesthetic_profile.json" \
+    --jpeg-dir "$JPEG_DIR" \
+    --output "$OUT_DIR/batch_scores.csv" \
+    --verbose
+
+  echo ""
+
+  # Stage 6: XMP星レーティング書き出し
+  echo "[Stage 6] XMP星レーティング書き出し..."
+  "$VENV" "$(dirname "$0")/stage6/xmp_writer.py" \
+    --scores "$OUT_DIR/batch_scores.csv" \
+    --xmp-dir "$OUT_DIR/xmp_rated" \
+    --overwrite
+else
+  echo "[Stage 4-6] rated_samples.json が見つからないためスキップ。"
+  echo "  先に Stage 3 を完了してください。"
+fi
+
+echo ""
 echo "=== パイプライン完了 ==="
-echo "  stage2_groups.csv → $OUT_DIR/stage2_groups.csv"
-echo "  rated_samples.json → $OUT_DIR/rated_samples.json"
+echo "  stage2_groups.csv   → $OUT_DIR/stage2_groups.csv"
+echo "  rated_samples.json  → $OUT_DIR/rated_samples.json"
+if [ -f "$OUT_DIR/aesthetic_profile.json" ]; then
+  echo "  aesthetic_profile.json → $OUT_DIR/aesthetic_profile.json"
+  echo "  batch_scores.csv    → $OUT_DIR/batch_scores.csv"
+  echo "  xmp_rated/          → $OUT_DIR/xmp_rated/"
+fi
