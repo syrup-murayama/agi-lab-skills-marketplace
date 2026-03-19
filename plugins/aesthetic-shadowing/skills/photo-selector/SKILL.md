@@ -214,6 +214,13 @@ Read ツールで画像として読み込む（パス: `<jpeg_dir>/<file>`）。
 
 ローカルCLIPモデルで全カットをスコアリングする（APIコストゼロ）。
 
+score.py には2つのモードがある:
+
+- **`--mode text`（デフォルト）**: `aesthetic_profile.json` のテキストキーワードを視覚アンカーとして使う。セットアップが不要で即実行できる。
+- **`--mode image`（推奨）**: `rated_samples.json` の評価済み画像そのものを視覚アンカーとして使う。実際の評価サンプルがある場合はこちらのほうが精度が高い（★4 recall: テキスト45% → 画像82%）。
+
+**テキストモード（デフォルト）**
+
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage5/score.py \
@@ -222,6 +229,21 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   --output /tmp/batch_scores.csv \
   --verbose
 ```
+
+**画像-画像モード（撮影者のサンプルがある場合に推奨）**
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
+  ${CLAUDE_PLUGIN_ROOT}/../../stage5/score.py \
+  --profile /tmp/aesthetic_profile.json \
+  --rated-samples /tmp/rated_samples.json \
+  --jpeg-dir <jpeg_dir> \
+  --output /tmp/batch_scores.csv \
+  --mode image \
+  --verbose
+```
+
+`rated_samples.json` が存在する場合は `--mode image` を優先して使うこと。
 
 ---
 
