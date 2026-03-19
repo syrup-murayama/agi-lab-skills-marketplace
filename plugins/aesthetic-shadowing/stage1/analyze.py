@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Stage 1: Technical quality filter
-S2 JPEGを解析し、ピンボケ・白飛び・黒潰れのカットを検出する。
+Stage 1: 完全露出ミスフィルター
+S2 JPEGを解析し、真っ白（完全白飛び）・真っ黒（完全黒潰れ）のカットだけを除外する。
+フォーカス（ブレ・ピントずれ）の判定は Stage2 の technical_score に委ねる。
+
 除外フラグが立ったカットに対応するCR3向けXMP Sidecarファイルを書き出す。
 """
 
@@ -14,24 +16,13 @@ import cv2
 import numpy as np
 
 # --- デフォルト閾値 ---
-# blur: 80は屋外高コントラスト向けで屋内低コントラスト撮影では過剰除外（90%超）になる。
-#       20に下げることで屋内・屋外どちらでも20〜40%の適切な除外率が得られる。
-DEFAULT_BLUR_THRESHOLD = 20.0    # ラプラシアン分散がこれ未満 = ピンボケ
-DEFAULT_BLOWN_THRESHOLD = 0.03   # 輝度最大付近のピクセルが3%超 = 白飛び
-DEFAULT_DARK_THRESHOLD = 0.05    # 輝度最小付近のピクセルが5%超 = 黒潰れ
-
-
-def analyze_blur(gray: np.ndarray, threshold: float) -> tuple[float, bool]:
-    """
-    画像中央60%領域のラプラシアン分散でフォーカスを評価する。
-    値が低いほどぼやけている。
-    """
-    h, w = gray.shape
-    margin_y = int(h * 0.2)
-    margin_x = int(w * 0.2)
-    subject_region = gray[margin_y:h - margin_y, margin_x:w - margin_x]
-    score = float(cv2.Laplacian(subject_region, cv2.CV_64F).var())
-    return score, score < threshold
+# "完全な撮影失敗カット"だけを絶対除外する設計。
+# フォーカス評価はStage2のtechnical_score（sharpness_score）に委ねる。
+#
+# 白飛び: ピクセルの80%以上が輝度253以上 = ほぼ真っ白な失敗カット
+# 黒潰れ: ピクセルの80%以上が輝度2以下  = ほぼ真っ黒な失敗カット
+DEFAULT_BLOWN_THRESHOLD = 0.80   # 白飛び率がこれ超 = 完全白飛び
+DEFAULT_DARK_THRESHOLD  = 0.80   # 黒潰れ率がこれ超 = 完全黒潰れ
 
 
 def analyze_exposure(
@@ -40,7 +31,7 @@ def analyze_exposure(
     dark_threshold: float,
 ) -> tuple[float, float, bool, bool]:
     """
-    ヒストグラムで白飛び・黒潰れを評価する。
+    ヒストグラムで完全白飛び・完全黒潰れを評価する。
     """
     total = gray.size
     blown_ratio = float(np.sum(gray >= 253)) / total
@@ -66,22 +57,18 @@ def write_rejection_xmp(xmp_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description='Stage 1: S2 JPEGの技術品質フィルター',
+        description='Stage 1: 完全な露出ミスカット（真っ白・真っ黒）のみを除外',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument('jpeg_dir', help='S2 JPEGが入ったフォルダ')
     parser.add_argument('cr3_dir', help='CR3が入ったフォルダ（XMPをここに書き出す）')
     parser.add_argument(
-        '--blur-threshold', type=float, default=DEFAULT_BLUR_THRESHOLD,
-        help='ラプラシアン分散の閾値（低いほど厳しい）',
-    )
-    parser.add_argument(
         '--blown-threshold', type=float, default=DEFAULT_BLOWN_THRESHOLD,
-        help='白飛びピクセル比率の閾値',
+        help='白飛びピクセル比率の閾値（0.80=80%%以上が白飛びで除外）',
     )
     parser.add_argument(
         '--dark-threshold', type=float, default=DEFAULT_DARK_THRESHOLD,
-        help='黒潰れピクセル比率の閾値',
+        help='黒潰れピクセル比率の閾値（0.80=80%%以上が黒潰れで除外）',
     )
     parser.add_argument(
         '--dry-run', action='store_true',
@@ -108,14 +95,15 @@ def main() -> None:
 
     print(f'\n=== Aesthetic Shadowing Agent - Stage 1 ===')
     print(f'対象: {len(jpeg_files)} ファイル')
-    print(f'閾値: ピンボケ={args.blur_threshold} / 白飛び={args.blown_threshold:.0%} / 黒潰れ={args.dark_threshold:.0%}')
+    print(f'閾値: 白飛び={args.blown_threshold:.0%} / 黒潰れ={args.dark_threshold:.0%}')
+    print(f'（フォーカス評価はStage2のtechnical_scoreに委ねる設計）')
     if args.dry_run:
         print('（ドライランモード: XMPは書き出しません）')
     print()
 
-    header = f'{"ファイル名":<28} {"ピンボケ":>8} {"白飛び%":>7} {"黒潰れ%":>7}  判定'
+    header = f'{"ファイル名":<28} {"白飛び%":>7} {"黒潰れ%":>7}  判定'
     print(header)
-    print('-' * 65)
+    print('-' * 55)
 
     results = []
     rejected_count = 0
@@ -128,14 +116,11 @@ def main() -> None:
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        blur_score, is_blurry = analyze_blur(gray, args.blur_threshold)
         blown_ratio, dark_ratio, is_blown, is_dark = analyze_exposure(
             gray, args.blown_threshold, args.dark_threshold
         )
 
         flags = []
-        if is_blurry:
-            flags.append('ピンボケ')
         if is_blown:
             flags.append('白飛び')
         if is_dark:
@@ -144,7 +129,7 @@ def main() -> None:
         is_rejected = bool(flags)
         verdict = '  NG: ' + ' / '.join(flags) if is_rejected else '  OK'
 
-        print(f'{jpeg_path.name:<28} {blur_score:>8.1f} {blown_ratio:>6.1%} {dark_ratio:>6.1%}  {verdict}')
+        print(f'{jpeg_path.name:<28} {blown_ratio:>6.1%} {dark_ratio:>6.1%}  {verdict}')
 
         if is_rejected:
             rejected_count += 1
@@ -154,14 +139,13 @@ def main() -> None:
 
         results.append({
             'file': jpeg_path.name,
-            'blur_score': round(blur_score, 2),
             'blown_pct': round(blown_ratio * 100, 2),
             'dark_pct': round(dark_ratio * 100, 2),
             'flags': ' / '.join(flags) if flags else 'OK',
             'rejected': is_rejected,
         })
 
-    print('-' * 65)
+    print('-' * 55)
     total = len(results)
     print(f'\n結果: {total} ファイル中 {rejected_count} 件を除外 ({rejected_count / total:.1%})')
 
