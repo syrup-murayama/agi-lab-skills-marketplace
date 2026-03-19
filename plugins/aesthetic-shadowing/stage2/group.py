@@ -327,10 +327,21 @@ def compute_technical_scores(shots: list[Shot]) -> None:
 
 # ---- 読み込み ----
 
+def load_rejected_stems(xmp_dir: Path) -> set[str]:
+    """XMPファイルからpick=-1のファイル名（stem）を返す。"""
+    rejected = set()
+    for xmp_path in xmp_dir.glob('*.xmp'):
+        content = xmp_path.read_text(encoding='utf-8', errors='ignore')
+        if 'xmpDM:pick="-1"' in content:
+            rejected.add(xmp_path.stem)
+    return rejected
+
+
 def load_shots(
     jpeg_dir: Path,
     detector: PersonDetector,
     verbose: bool,
+    rejected_stems: set[str] | None = None,
 ) -> list[Shot]:
     jpeg_files = sorted(
         list(jpeg_dir.glob('*.JPG')) + list(jpeg_dir.glob('*.jpg'))
@@ -339,10 +350,17 @@ def load_shots(
         print(f'エラー: JPEGが見つかりません: {jpeg_dir}')
         sys.exit(1)
 
+    if rejected_stems is None:
+        rejected_stems = set()
+
     shots = []
+    n_skipped = 0
     t0 = time.time()
 
     for i, p in enumerate(jpeg_files):
+        if p.stem in rejected_stems:
+            n_skipped += 1
+            continue
         try:
             pil_img = Image.open(p)
             dt  = _exif_datetime(pil_img)
@@ -370,6 +388,9 @@ def load_shots(
         if verbose and (i + 1) % 50 == 0:
             print(f'  {i + 1}/{len(jpeg_files)} ({time.time() - t0:.1f}s)')
 
+    if n_skipped:
+        print(f'Stage1除外: {n_skipped}枚スキップ')
+
     return shots
 
 
@@ -382,6 +403,8 @@ def main() -> None:
     )
     parser.add_argument('jpeg_dir')
     parser.add_argument('--output',                default='stage2_groups.csv')
+    parser.add_argument('--xmp-dir',               default=None,
+                        help='Stage1のXMP出力ディレクトリ。指定するとpick=-1のファイルをスキップする')
     parser.add_argument('--time-gap',              type=int,   default=DEFAULT_TIME_GAP_SEC)
     parser.add_argument('--phash-split',           type=int,   default=DEFAULT_PHASH_SPLIT)
     parser.add_argument('--hist-split',            type=float, default=DEFAULT_HIST_SPLIT)
@@ -399,8 +422,18 @@ def main() -> None:
         print(f'エラー: {jpeg_dir}')
         sys.exit(1)
 
+    rejected_stems: set[str] = set()
+    if args.xmp_dir:
+        xmp_dir = Path(args.xmp_dir)
+        if not xmp_dir.exists():
+            print(f'エラー: xmp-dir が見つかりません: {xmp_dir}')
+            sys.exit(1)
+        rejected_stems = load_rejected_stems(xmp_dir)
+
     print('\n=== Aesthetic Shadowing Agent - Stage 2 Step A ===')
     print(f'対象: {jpeg_dir}')
+    if args.xmp_dir:
+        print(f'XMPディレクトリ: {args.xmp_dir}')
     print(f'時刻ギャップ: {args.time_gap}s  '
           f'pHash閾値: {args.phash_split}  '
           f'ヒスト相関閾値: {args.hist_split}  '
@@ -412,7 +445,7 @@ def main() -> None:
     detector = PersonDetector()
 
     t_start = time.time()
-    shots = load_shots(jpeg_dir, detector, args.verbose)
+    shots = load_shots(jpeg_dir, detector, args.verbose, rejected_stems)
     t_load = time.time() - t_start
     print(f'{len(shots)} ファイル読み込み完了 ({t_load:.1f}s / '
           f'{t_load / len(shots) * 100:.1f}s per 100枚)')
