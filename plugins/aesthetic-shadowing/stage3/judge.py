@@ -394,6 +394,7 @@ class ShotRecord:
     group_size: int
     position: str           # first / last / middle / solo
     technical_score: float  # 0.0〜1.0（新CSVのみ）
+    sharpness_score: float  # 0.0〜1.0 グループ内相対シャープネス
     has_technical: bool     # technical_scoreフィールドが存在したか
 
 
@@ -433,28 +434,41 @@ def load_shots(csv_path: Path) -> dict[int, list[ShotRecord]]:
         for row in reader:
             gid = int(row["group_id"])
             tech = float(row["technical_score"]) if has_technical else 0.0
+            sharp = float(row["sharpness_score"]) if "sharpness_score" in fieldnames else 1.0
             by_group.setdefault(gid, []).append(ShotRecord(
                 file=row["file"],
                 group_id=gid,
                 group_size=int(row.get("group_size", 1)),
                 position=row.get("position", ""),
                 technical_score=tech,
+                sharpness_score=sharp,
                 has_technical=has_technical,
             ))
 
-    # 各グループを technical_score 降順（なければ position=="first" 優先）でソート
+    # 各グループを position 優先でソート: first → solo → last → middle
+    _pos_order = {"first": 0, "solo": 1, "last": 2, "middle": 3}
     for members in by_group.values():
-        if members[0].has_technical:
-            members.sort(key=lambda s: s.technical_score, reverse=True)
-        else:
-            members.sort(key=lambda s: (0 if s.position == "first" else 1, s.file))
+        members.sort(key=lambda s: (_pos_order.get(s.position, 3), s.file))
 
     return by_group
 
 
+# ブレ絶対失敗の閾値（グループ内相対スコアがこれ未満 = 明らかな失敗カット）
+_BLUR_FAIL_THRESHOLD = 0.1
+
+
 def _best_shot(members: list[ShotRecord]) -> ShotRecord:
-    """グループの代表1枚を返す。technical_score最高 or position==first。"""
-    return members[0]  # load_shots でソート済み
+    """グループの代表1枚を返す。
+
+    選定ルール:
+    1. sharpness_score が極端に低い（< 0.1）カットを候補から除外（代替がある場合のみ）
+    2. 残った候補から position == 'first' を優先（load_shots でソート済み）
+    3. すべて失敗の場合は先頭にフォールバック
+    """
+    candidates = [m for m in members if m.sharpness_score >= _BLUR_FAIL_THRESHOLD]
+    if not candidates:
+        candidates = members  # 全カット失敗 → フォールバック
+    return candidates[0]  # load_shots で position='first' 優先にソート済み
 
 
 # ---- 代表カット選定 ----
@@ -506,8 +520,8 @@ def select_samples(
     need = n_samples - len(selected)
     selected += candidates[:need]
 
-    # group_id 昇順に並べ直す
-    selected.sort(key=lambda e: (e.group_id, -e.technical_score))
+    # group_id 昇順に並べ直す（多様性を保つためスコアではなくファイル順）
+    selected.sort(key=lambda e: (e.group_id, e.file))
     return selected
 
 
