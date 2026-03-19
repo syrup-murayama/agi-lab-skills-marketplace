@@ -20,6 +20,10 @@
         "creative-tool",
         "chronicler",
         "hackathon-2026"
+      ],
+      "skills": [
+        "./skills/photo-selector",
+        "./skills/chronicler"
       ]
     },
     {
