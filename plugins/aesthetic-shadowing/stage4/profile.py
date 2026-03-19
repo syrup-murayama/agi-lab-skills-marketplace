@@ -309,6 +309,13 @@ def main() -> None:
         print("エラー: 評価済みサンプルが 0 枚です。judge.py でレーティングを完了してください。", file=sys.stderr)
         sys.exit(1)
 
+    # .env ファイルがあれば読み込む（python-dotenv 任意）
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass  # python-dotenv 未インストールでも動作する
+
     # anthropic インポート（venv に入っていない場合はエラーメッセージを出す）
     try:
         import anthropic
