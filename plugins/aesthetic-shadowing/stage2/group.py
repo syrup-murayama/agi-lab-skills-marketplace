@@ -328,11 +328,11 @@ def compute_technical_scores(shots: list[Shot]) -> None:
 # ---- 読み込み ----
 
 def load_rejected_stems(xmp_dir: Path) -> set[str]:
-    """XMPファイルからpick=-1のファイル名（stem）を返す。"""
+    """XMPファイルからpick=-1またはRating=-1のファイル名（stem）を返す。"""
     rejected = set()
     for xmp_path in xmp_dir.glob('*.xmp'):
         content = xmp_path.read_text(encoding='utf-8', errors='ignore')
-        if 'xmpDM:pick="-1"' in content:
+        if 'xmpDM:pick="-1"' in content or 'xmp:Rating="-1"' in content:
             rejected.add(xmp_path.stem)
     return rejected
 

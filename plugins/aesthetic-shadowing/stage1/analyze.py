@@ -47,14 +47,15 @@ def analyze_exposure(
 
 
 def write_rejection_xmp(xmp_path: Path) -> None:
-    """Lightroom互換のXMP Sidecarを書き出す（Rating=-1 = 却下）。"""
+    """Lightroom互換のXMP Sidecarを書き出す（pick=-1 = 却下フラグ）。"""
     content = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Aesthetic Shadowing Agent">\n'
         '  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
         '    <rdf:Description rdf:about=""\n'
         '      xmlns:xmp="http://ns.adobe.com/xap/1.0/"\n'
-        '      xmp:Rating="-1"/>\n'
+        '      xmlns:xmpDM="http://ns.adobe.com/xmp/1.0/DynamicMedia/"\n'
+        '      xmpDM:pick="-1"/>\n'
         '  </rdf:RDF>\n'
         '</x:xmpmeta>\n'
     )
