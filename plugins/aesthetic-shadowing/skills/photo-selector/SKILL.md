@@ -152,21 +152,58 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 
 ---
 
-### Step 4: 審美眼プロファイル生成
+### Step 4: 審美眼プロファイル生成（Claude ネイティブ）
 
 `rated_samples.json` が存在する場合のみ実行する。
 
-```bash
-${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
-  ${CLAUDE_PLUGIN_ROOT}/../../stage4/profile.py \
-  --rated /tmp/rated_samples.json \
-  --session /tmp/session.json \
-  --jpeg-dir <jpeg_dir> \
-  --mode text \
-  --output /tmp/aesthetic_profile.json
+**このステップは Claude 自身が直接実行する（API キー不要）。**
+外部スクリプトを呼び出さず、以下の手順でプロファイルを生成する。
+
+**1. データ読み込み**
+
+Read ツールで以下を読み込む:
+- `/tmp/rated_samples.json`（Stage3 の出力）
+- `/tmp/session.json`（`intent` フィールドを取得）
+
+**2. サンプル分類**
+
+`skipped: true` のものを除外し:
+- 高評価: `human_rating >= 4`
+- 低評価: `human_rating <= 2`
+- 統計: 合計・高評価数・低評価数・平均レーティング・分布
+
+**3. 視覚分析（推奨）**
+
+高評価サンプルを `learning_weight` 降順でソートし、上位最大 10 枚を
+Read ツールで画像として読み込む（パス: `<jpeg_dir>/<file>`）。
+画像が読めない場合はテキスト分析にフォールバックする。
+
+**4. プロファイル生成**
+
+分析結果をもとに、以下の JSON を Write ツールで `/tmp/aesthetic_profile.json` に保存する:
+
+```json
+{
+  "session_name": "<セッション名>",
+  "created_at": "<ISO8601タイムスタンプ>",
+  "mode": "vision",
+  "intent": "<撮影意図>",
+  "profile_text": "高評価・低評価それぞれの傾向を3〜5文で説明する文章",
+  "clip_query": "Stage5 CLIP 検索クエリ（日本語可、20字以内）",
+  "high_keywords": ["高評価に共通するキーワードを3〜6個"],
+  "low_keywords": ["低評価に共通するキーワードを3〜6個"],
+  "stats": {
+    "total_rated": 0,
+    "high_count": 0,
+    "low_count": 0,
+    "avg_rating": 0.0,
+    "distribution": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+  },
+  "model": "claude-native"
+}
 ```
 
-完了後、生成されたプロファイルの要点をユーザーに報告する。
+完了後、プロファイルの要点（profile_text・clip_query・high/low keywords）をユーザーに報告する。
 
 ---
 

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Stage 4A/4B: 審美眼プロファイル生成
+Stage 4A/4B: 審美眼プロファイル生成（スタンドアロン版）
+
+NOTE: photo-selector スキルでは、このスクリプトは使用しない。
+      スキルは Claude Code が直接分析を実行するため API キー不要。
+      このスクリプトは ANTHROPIC_API_KEY がある環境での単独実行用。
+---
 
 rated_samples.json（Stage3の出力）から「審美眼プロファイル」を生成し、
 aesthetic_profile.json として保存する。
