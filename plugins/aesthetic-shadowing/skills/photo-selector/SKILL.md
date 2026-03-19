@@ -245,8 +245,10 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 | `/tmp/session.json` | セッション情報・撮影意図 | Stage3 |
 | `/tmp/stage1_results.csv` | 技術フィルタリング結果 | Stage2 |
 | `/tmp/stage2_groups.csv` | グループ化・技術スコア付きCSV | Stage3 |
-| `/tmp/rated_samples.json` | 人間レーティング付きサンプル | Stage4（実装後） |
-| `<xmp_dir>/*.xmp` | Lightroom対応レーティング | —（最終出力） |
+| `/tmp/rated_samples.json` | 人間レーティング付きサンプル | Stage4 |
+| `/tmp/aesthetic_profile.json` | Claude生成の審美眼プロファイル | Stage5 |
+| `/tmp/batch_scores.csv` | CLIPスコアリング結果（全カット） | Stage6 |
+| `/tmp/xmp_rated/*.xmp` | Lightroom対応レーティング | —（最終出力） |
 
 ---
 

@@ -1,7 +1,7 @@
 {
   "name": "aesthetic-shadowing",
-  "display_name": "Aesthetic Shadowing & Chronicler",
-  "description": "フォトグラファーの審美眼をAIに継承させるセレクト支援と、挑戦の軌跡を物語るChronicler機能を統合したクリエイティブ・パートナー・エージェント。",
+  "display_name": "Aesthetic Shadowing",
+  "description": "フォトグラファーの審美眼を30枚の判断から学習し、数千枚を自律的にセレクトするAIエージェント。Stage1〜6のフルパイプライン実装済み。",
   "version": "0.1.0",
   "author": {
     "name": "Daisuke Murayama",
@@ -11,20 +11,20 @@
   "capabilities": {
     "skills": [
       {
-        "name": "chronicler",
-        "description": "開発ログからドラマを抽出し、MY_JOURNEY.mdにドキュメンタリーを執筆する。"
+        "name": "photo-selector",
+        "description": "撮影意図を伝えるだけで、技術フィルタ・グループ化・審美眼学習・CLIP採点・XMP書き出しまで全自動で行うセレクト支援スキル。"
       },
       {
-        "name": "photo-selector",
-        "description": "プロの視点を模倣し、大量のRAWデータから意図に沿ったカットを自律的に選別する（開発中）。"
+        "name": "chronicler",
+        "description": "開発ログからドラマを抽出し、MY_JOURNEY.mdにドキュメンタリーを執筆する補助スキル。"
       }
     ]
   },
   "tags": [
     "photography",
     "creative-workflow",
-    "narrative",
     "lightroom-integration",
-    "human-in-the-loop"
+    "human-in-the-loop",
+    "clip"
   ]
 }

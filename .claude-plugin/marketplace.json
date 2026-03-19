@@ -12,13 +12,14 @@
     {
       "name": "aesthetic-shadowing",
       "source": "./plugins/aesthetic-shadowing",
-      "description": "フォトグラファーの感性を学習するセレクト支援と、開発者の挑戦を記録するChronicler機能を備えたAIエージェント。",
+      "description": "フォトグラファーの審美眼を30枚の判断から学習し、数千枚を自律的にセレクトするAIエージェント。Stage1〜6フルパイプライン実装済み（技術フィルタ・グループ化・審美眼学習・CLIPスコアリング・XMP書き出し）。",
       "version": "0.1.0",
       "category": "creative",
       "tags": [
         "photography",
         "creative-tool",
-        "chronicler",
+        "lightroom-integration",
+        "clip",
         "hackathon-2026"
       ],
       "skills": [

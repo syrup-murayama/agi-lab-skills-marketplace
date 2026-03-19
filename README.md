@@ -50,7 +50,7 @@ Aesthetic Shadowing
 
 ```
 旧設計: ユーザーが全対戦に立ち会う → 枚数 × 時間
-新設計: 20対戦でスタイルを学習 → あとはAIが自律実行
+新設計: 代表30枚をレーティングしてスタイルを学習 → あとはAIが自律実行
 ```
 
 | 指標 | 旧設計 | 新設計 |
@@ -82,7 +82,7 @@ Aesthetic Shadowing
 /photo-selector
 ```
 
-あとはClaudeが対話しながら全自動で進める。途中でエラーが起きても、自分で立て直す。
+あとはClaudeが対話しながら全自動で進める。
 
 ---
 
@@ -119,16 +119,15 @@ Aesthetic Shadowing
                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Stage 3: 審美眼学習（LLM・ユーザー参加6分）                      │
-│  代表ペア20対戦でユーザーの選好を学習                             │
-│  → スタイルルールを言語化・構造化                                 │
+│  代表30枚に1〜5でレーティング → Claude がスタイルルールを言語化   │
 └────────────────┬────────────────────────────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Stage 4〜6: 全件自動採点 → 出力（LLM + ローカル）               │
-│  学習済みスタイルルールで残り全カットを自律ランキング              │
-│  信頼度の低いグループのみスポットチェックをユーザーに提示          │
-│  → XMPサイドカーをLightroomに直接書き出し                        │
+│  Stage 4〜6: 全件自動採点 → 出力（Claude + ローカルCLIP）        │
+│  Stage4: Claude が審美眼プロファイルを生成（APIキー不要）         │
+│  Stage5: ローカルCLIPで全カットをスコアリング（APIコストゼロ）    │
+│  Stage6: XMPサイドカーをLightroomに直接書き出し                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -137,6 +136,11 @@ Aesthetic Shadowing
 - ローカル処理: Python, OpenCV, Rawpy, ExifTool, imagehash
 - LLM: Claude（マルチモーダル）
 - 出力: XMP Sidecarファイル（Adobe Lightroom連携）
+
+---
+
+> **補助スキル**: `chronicler` は開発ログから章を自動生成する補助スキル。
+> 詳細は [`skills/chronicler/SKILL.md`](plugins/aesthetic-shadowing/skills/chronicler/SKILL.md) を参照。
 
 ---
 
@@ -159,14 +163,27 @@ Aesthetic Shadowing
 | Stage 0: 意図理解 | ✅ 完成 | セッション初期化・撮影コンテキスト把握 |
 | Stage 1: 技術フィルタ | ✅ 完成 | ピンボケ・白飛び・黒潰れの自動除外 |
 | Stage 2: グループ化 | ✅ 完成 | シーン単位での時系列クラスタリング |
-| Stage 3: 審美眼学習 | 🚧 実装中 | スタイルルール学習フェーズ |
-| Stage 4-6: 全件自動採点 | 📋 設計完了 | バッチ自律評価 → XMP出力 |
+| Stage 3: 審美眼学習 | ✅ 完成 | 代表30枚をレーティング → スタイルルール抽出 |
+| Stage 4: プロファイル生成 | ✅ 完成 | Claude が直接実行（APIキー不要） |
+| Stage 5: CLIPスコアリング | ✅ 完成 | ローカルCLIPで全カットをバッチ採点 |
+| Stage 6: XMP書き出し | ✅ 完成 | Lightroom対応サイドカーを自動生成 |
+
+---
+
+## バッチ実行（スタンドアロン）
+
+Claude Codeを使わず、コマンドラインで一括実行する場合は `run_pipeline.sh` を使う（`ANTHROPIC_API_KEY` 環境変数が必要）:
+
+```bash
+./run_pipeline.sh <jpeg_dir> <xmp_dir> <output_dir> [session.json]
+```
+
+Stage4 は `stage4/profile.py` を呼び出す（Claudeネイティブ実行の代替）。
 
 ---
 
 ## ロードマップ
 
-- **Stage 4-6 の完成** — CLIPによる全件スコアリング + XMP書き出し自動化
 - **ローカルLLM対応** — Ollama連携（オフライン・ゼロAPIコスト）
 - **専用UI** — 審美眼学習フェーズのビジュアルインターフェース
 - **マルチフォトグラファー対応** — ユーザーごとのスタイルプロファイル保存
@@ -184,14 +201,19 @@ plugins/
 │   ├── .claude-plugin/
 │   │   └── plugin.json
 │   ├── skills/
-│   │   └── photo-selector/
+│   │   ├── photo-selector/    ← メインスキル
+│   │   │   └── SKILL.md
+│   │   └── chronicler/        ← 補助スキル（開発ログ自動生成）
 │   │       └── SKILL.md
-│   ├── stage0/                 stage1〜3/
-│   ├── stage1/
-│   ├── stage2/
-│   ├── stage3/
-│   └── MY_JOURNEY.md           ← 開発記録
-├── hackathon-starter/          ← 参加者向けスターター
+│   ├── stage0/                ← セッション初期化
+│   ├── stage1/                ← 技術フィルタ（.venv含む）
+│   ├── stage2/                ← グループ化
+│   ├── stage3/                ← 審美眼サンプリング
+│   ├── stage4/                ← プロファイル生成（Claudeネイティブ）
+│   ├── stage5/                ← CLIPバッチスコアリング
+│   ├── stage6/                ← XMP書き出し
+│   ├── run_pipeline.sh        ← バッチ実行（APIキー要）
+│   └── MY_JOURNEY.md          ← 開発記録
 └── terminal-vibes/
 ```
 
