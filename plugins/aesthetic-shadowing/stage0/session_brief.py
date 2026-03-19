@@ -34,7 +34,7 @@ def detect_keywords(text: str) -> list[str]:
     candidates = [
         "笑顔", "表情", "生き生き", "瞬間",
         "子ども", "長男", "次男", "長女", "彼", "彼女",
-        "友達", "関わり", "みんな", "グループ",
+        "友達", "関わり", "みんな", "グループ", "生徒",
         "記録", "アルバム", "思い出",
         "クライアント", "PR", "広報",
         "旅行", "観光",
@@ -71,7 +71,7 @@ def classify_output_use(text: str, category: str) -> str:
 def build_selection_hints(text: str, category: str) -> dict:
     expressions_kws = ["笑顔", "表情", "生き生き", "瞬間"]
     subject_kws = ["子ども", "長男", "次男", "長女", "彼", "彼女", "家族"]
-    group_kws = ["友達", "関わり", "みんな", "グループ"]
+    group_kws = ["友達", "関わり", "みんな", "グループ", "生徒"]
 
     return {
         "prioritize_expressions":      any(kw in text for kw in expressions_kws),
