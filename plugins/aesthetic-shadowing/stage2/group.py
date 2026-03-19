@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Stage 2 Step A: シーングルーピング
+Stage 2 Step A: シーングルーピング + 技術スコアリング
 
 処理フロー:
   1. EXIF DateTimeOriginal で時刻順ソート
   2. 30秒ウィンドウで「シーン候補」を一次グループ化
   3. グループ内で pHash + L*a*b*ヒストグラム相関により
      「見た目が変わった」と判断したら分割
-  4. 正面顔 / 横顔 / 上半身の Haar カスケードで人物数を推定
-  5. 各カットに position（first / last / middle / solo）と
-     ボーナス重みを付与
-  6. CSV 出力
+  4. 正面顔 / 横顔の Haar カスケードで人物数を推定
+  5. 各カットに position（first / last / middle / solo）を付与
+     （--enable-position-bonus で旧来のボーナス重みを有効化可能）
+  6. 技術スコアを算出（sharpness / exposure / technical）
+  7. CSV 出力
 
 使い方:
   python group.py <jpeg_dir> [オプション]
@@ -23,7 +24,7 @@ import argparse
 import csv
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import groupby
 from pathlib import Path
@@ -34,15 +35,24 @@ import numpy as np
 from PIL import Image, ExifTags
 
 # ---- 定数 ----
-DEFAULT_TIME_GAP_SEC  = 30    # この秒数を超えたら別シーン候補
-DEFAULT_PHASH_SPLIT   = 18    # pHash ハミング距離がこれ以上 → 分割
-DEFAULT_HIST_SPLIT    = 0.40  # ヒストグラム相関がこれ未満（かつ pHash がグレー） → 分割補強
-DEFAULT_MIN_VISUAL_GAP = 5    # この秒数未満の連続ショットは pHash 分割しない
-DEFAULT_SOLO_MERGE_GAP = 10   # 隣接 SOLO グループをこの秒数以内でマージ
-BONUS_FIRST           = 1.5   # シーン最初の1枚
-BONUS_LAST            = 1.3   # シーン最後の1枚
-BONUS_SOLO            = 1.5   # シーンが1枚だけ（単独ショット）
-WEIGHT_MIDDLE         = 1.0   # 中間カット
+DEFAULT_TIME_GAP_SEC   = 30    # この秒数を超えたら別シーン候補
+DEFAULT_PHASH_SPLIT    = 18    # pHash ハミング距離がこれ以上 → 分割
+DEFAULT_HIST_SPLIT     = 0.40  # ヒストグラム相関がこれ未満（かつ pHash がグレー） → 分割補強
+DEFAULT_MIN_VISUAL_GAP = 5     # この秒数未満の連続ショットは pHash 分割しない
+DEFAULT_SOLO_MERGE_GAP = 10    # 隣接 SOLO グループをこの秒数以内でマージ
+
+# 旧来のポジションボーナス（--enable-position-bonus で有効）
+BONUS_FIRST    = 1.5
+BONUS_LAST     = 1.3
+BONUS_SOLO     = 1.5
+WEIGHT_MIDDLE  = 1.0
+
+# 技術スコアの重み
+WEIGHT_SHARPNESS = 0.6
+WEIGHT_EXPOSURE  = 0.4
+
+# リサイズ基準（速度優先）
+ANALYSIS_SHORT_SIDE = 512
 
 
 # ---- データ構造 ----
@@ -53,11 +63,15 @@ class Shot:
     stem: str
     dt: datetime | None
     phash: imagehash.ImageHash
-    hist: np.ndarray       # L*a*b* 3チャンネル 32-bin ヒストグラム結合
+    hist: np.ndarray           # L*a*b* 3チャンネル 32-bin ヒストグラム結合
     person_count: int = 0
     group_id: int = -1
     position: str = 'middle'   # first / last / middle / solo
-    bonus_weight: float = WEIGHT_MIDDLE
+    bonus_weight: float = 1.0
+    sharpness_raw: float = 0.0  # ラプラシアン分散（グループ内正規化前）
+    sharpness_score: float = 0.0  # グループ内相対スコア 0.0〜1.0
+    exposure_score: float = 0.0   # 露出スコア 0.0〜1.0
+    technical_score: float = 0.0  # 総合技術スコア 0.0〜1.0
 
 
 # ---- EXIF ----
@@ -99,6 +113,43 @@ def _hist_corr(a: np.ndarray, b: np.ndarray) -> float:
         b.astype(np.float32).reshape(-1, 1),
         cv2.HISTCMP_CORREL,
     ))
+
+
+def _resize_for_analysis(bgr: np.ndarray) -> np.ndarray:
+    """短辺が ANALYSIS_SHORT_SIDE px になるようリサイズ（既に小さければそのまま）。"""
+    h, w = bgr.shape[:2]
+    short = min(h, w)
+    if short <= ANALYSIS_SHORT_SIDE:
+        return bgr
+    scale = ANALYSIS_SHORT_SIDE / short
+    return cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+
+def _sharpness_raw(bgr: np.ndarray) -> float:
+    """ラプラシアン分散でシャープネスを計算。短辺512pxにリサイズして速度優先。"""
+    small = _resize_for_analysis(bgr)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _exposure_score(bgr: np.ndarray) -> float:
+    """
+    白飛び・黒潰れ率からスコアを計算。
+    - 白飛び（輝度255）が全ピクセルの5%超 → ペナルティ
+    - 黒潰れ（輝度0）が全ピクセルの5%超 → ペナルティ
+    各超過1%あたり0.2のペナルティ（5%超過でスコア0）
+    """
+    small = _resize_for_analysis(bgr)
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    total = gray.size
+    overexp = float(np.sum(gray == 255)) / total
+    underexp = float(np.sum(gray == 0)) / total
+    score = 1.0
+    if overexp > 0.05:
+        score -= min(1.0, (overexp - 0.05) * 20)
+    if underexp > 0.05:
+        score -= min(1.0, (underexp - 0.05) * 20)
+    return max(0.0, score)
 
 
 # ---- 人物検出 ----
@@ -234,8 +285,12 @@ def merge_solo_groups(shots: list[Shot], max_gap_sec: float) -> None:
         s.group_id = remap[s.group_id]
 
 
-def assign_positions(shots: list[Shot]) -> None:
-    """group_id ごとに first/last/middle/solo とボーナスをインプレースで付与する。"""
+def assign_positions(shots: list[Shot], enable_bonus: bool = False) -> None:
+    """group_id ごとに first/last/middle/solo をインプレースで付与する。
+
+    enable_bonus=True のとき旧来のボーナス重みを適用。
+    デフォルトは全カット bonus_weight=1.0（フラット）。
+    """
     by_group: dict[int, list[Shot]] = {}
     for s in shots:
         by_group.setdefault(s.group_id, []).append(s)
@@ -243,15 +298,31 @@ def assign_positions(shots: list[Shot]) -> None:
     for members in by_group.values():
         if len(members) == 1:
             members[0].position = 'solo'
-            members[0].bonus_weight = BONUS_SOLO
+            members[0].bonus_weight = BONUS_SOLO if enable_bonus else 1.0
         else:
             members[0].position = 'first'
-            members[0].bonus_weight = BONUS_FIRST
+            members[0].bonus_weight = BONUS_FIRST if enable_bonus else 1.0
             members[-1].position = 'last'
-            members[-1].bonus_weight = BONUS_LAST
+            members[-1].bonus_weight = BONUS_LAST if enable_bonus else 1.0
             for m in members[1:-1]:
                 m.position = 'middle'
                 m.bonus_weight = WEIGHT_MIDDLE
+
+
+def compute_technical_scores(shots: list[Shot]) -> None:
+    """グループ内でシャープネスを正規化し、technical_score をインプレースで計算する。"""
+    by_group: dict[int, list[Shot]] = {}
+    for s in shots:
+        by_group.setdefault(s.group_id, []).append(s)
+
+    for members in by_group.values():
+        max_sharp = max(m.sharpness_raw for m in members)
+        for m in members:
+            m.sharpness_score = m.sharpness_raw / max_sharp if max_sharp > 0 else 0.0
+            m.technical_score = (
+                m.sharpness_score * WEIGHT_SHARPNESS
+                + m.exposure_score * WEIGHT_EXPOSURE
+            )
 
 
 # ---- 読み込み ----
@@ -287,10 +358,13 @@ def load_shots(
 
         hist = _lab_hist(bgr)
         n_persons = detector.count(bgr)
+        sharp = _sharpness_raw(bgr)
+        exp_score = _exposure_score(bgr)
 
         shots.append(Shot(
             path=p, stem=p.stem, dt=dt, phash=ph,
             hist=hist, person_count=n_persons,
+            sharpness_raw=sharp, exposure_score=exp_score,
         ))
 
         if verbose and (i + 1) % 50 == 0:
@@ -303,19 +377,21 @@ def load_shots(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description='Stage 2 Step A: シーングルーピング',
+        description='Stage 2 Step A: シーングルーピング + 技術スコアリング',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument('jpeg_dir')
-    parser.add_argument('--output',           default='stage2_groups.csv')
-    parser.add_argument('--time-gap',         type=int,   default=DEFAULT_TIME_GAP_SEC)
-    parser.add_argument('--phash-split',      type=int,   default=DEFAULT_PHASH_SPLIT)
-    parser.add_argument('--hist-split',       type=float, default=DEFAULT_HIST_SPLIT)
-    parser.add_argument('--min-visual-gap',   type=float, default=DEFAULT_MIN_VISUAL_GAP,
+    parser.add_argument('--output',                default='stage2_groups.csv')
+    parser.add_argument('--time-gap',              type=int,   default=DEFAULT_TIME_GAP_SEC)
+    parser.add_argument('--phash-split',           type=int,   default=DEFAULT_PHASH_SPLIT)
+    parser.add_argument('--hist-split',            type=float, default=DEFAULT_HIST_SPLIT)
+    parser.add_argument('--min-visual-gap',        type=float, default=DEFAULT_MIN_VISUAL_GAP,
                         help='この秒数未満の連続ショットは pHash 分割しない')
-    parser.add_argument('--solo-merge-gap',   type=float, default=DEFAULT_SOLO_MERGE_GAP,
+    parser.add_argument('--solo-merge-gap',        type=float, default=DEFAULT_SOLO_MERGE_GAP,
                         help='隣接SOLOをこの秒数以内でマージ（0=無効）')
-    parser.add_argument('--verbose',          action='store_true')
+    parser.add_argument('--enable-position-bonus', action='store_true',
+                        help='first/last/soloにボーナス重みを付与（旧動作）')
+    parser.add_argument('--verbose',               action='store_true')
     args = parser.parse_args()
 
     jpeg_dir = Path(args.jpeg_dir)
@@ -329,7 +405,8 @@ def main() -> None:
           f'pHash閾値: {args.phash_split}  '
           f'ヒスト相関閾値: {args.hist_split}  '
           f'min_visual_gap: {args.min_visual_gap}s  '
-          f'solo_merge_gap: {args.solo_merge_gap}s')
+          f'solo_merge_gap: {args.solo_merge_gap}s  '
+          f'position_bonus: {args.enable_position_bonus}')
     print()
 
     detector = PersonDetector()
@@ -346,7 +423,8 @@ def main() -> None:
     assign_groups(shots, args.time_gap, args.phash_split, args.hist_split,
                   args.min_visual_gap)
     merge_solo_groups(shots, args.solo_merge_gap)
-    assign_positions(shots)
+    assign_positions(shots, enable_bonus=args.enable_position_bonus)
+    compute_technical_scores(shots)
 
     n_groups = max(s.group_id for s in shots) + 1
     t_total = time.time() - t_start
@@ -379,21 +457,26 @@ def main() -> None:
 
     fieldnames = [
         'file', 'datetime', 'group_id', 'group_size',
-        'position', 'bonus_weight', 'person_count', 'phash',
+        'position', 'person_count',
+        'sharpness_score', 'exposure_score', 'technical_score',
+        'bonus_weight', 'phash',
     ]
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for s in sorted(shots, key=lambda s: (s.group_id, s.dt or datetime.min, s.stem)):
             writer.writerow({
-                'file':         s.stem + '.JPG',
-                'datetime':     s.dt.isoformat() if s.dt else '',
-                'group_id':     s.group_id,
-                'group_size':   group_sizes[s.group_id],
-                'position':     s.position,
-                'bonus_weight': s.bonus_weight,
-                'person_count': s.person_count,
-                'phash':        str(s.phash),
+                'file':            s.stem + '.JPG',
+                'datetime':        s.dt.isoformat() if s.dt else '',
+                'group_id':        s.group_id,
+                'group_size':      group_sizes[s.group_id],
+                'position':        s.position,
+                'person_count':    s.person_count,
+                'sharpness_score': f'{s.sharpness_score:.4f}',
+                'exposure_score':  f'{s.exposure_score:.4f}',
+                'technical_score': f'{s.technical_score:.4f}',
+                'bonus_weight':    s.bonus_weight,
+                'phash':           str(s.phash),
             })
 
     print()
