@@ -13,8 +13,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# --- デフォルト閾値（テスト後に調整する） ---
-DEFAULT_BLUR_THRESHOLD = 80.0    # ラプラシアン分散がこれ未満 = ピンボケ
+# --- デフォルト閾値 ---
+# blur: 80は屋外高コントラスト向けで屋内低コントラスト撮影では過剰除外（90%超）になる。
+#       20に下げることで屋内・屋外どちらでも20〜40%の適切な除外率が得られる。
+DEFAULT_BLUR_THRESHOLD = 20.0    # ラプラシアン分散がこれ未満 = ピンボケ
 DEFAULT_BLOWN_THRESHOLD = 0.03   # 輝度最大付近のピクセルが3%超 = 白飛び
 DEFAULT_DARK_THRESHOLD = 0.05    # 輝度最小付近のピクセルが5%超 = 黒潰れ
 
