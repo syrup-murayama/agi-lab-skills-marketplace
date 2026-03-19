@@ -92,11 +92,14 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage1/analyze.py --help
 ```
 
+第2引数 `<xmp_dir>` は XMP サイドカーの書き出し先。CR3 フォルダがなければ任意のディレクトリを指定してよい。
+詳細 CSV は `<xmp_dir>/stage1_results.csv` に自動保存される。
+
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage1/analyze.py \
   <jpeg_dir> \
-  --output /tmp/stage1_results.csv
+  <xmp_dir>
 ```
 
 実行後、除外枚数をユーザーに報告する。除外率が異常に高い（>50%）場合は閾値を確認する。
@@ -243,7 +246,7 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 | ファイル | 内容 | 次のStageへの入力 |
 |----------|------|-----------------|
 | `/tmp/session.json` | セッション情報・撮影意図 | Stage3 |
-| `/tmp/stage1_results.csv` | 技術フィルタリング結果 | Stage2 |
+| `<xmp_dir>/stage1_results.csv` | 技術フィルタリング結果（xmp_dir に自動保存） | 参照用 |
 | `/tmp/stage2_groups.csv` | グループ化・技術スコア付きCSV | Stage3 |
 | `/tmp/rated_samples.json` | 人間レーティング付きサンプル | Stage4 |
 | `/tmp/aesthetic_profile.json` | Claude生成の審美眼プロファイル | Stage5 |

@@ -1,5 +1,15 @@
 #!/bin/bash
-# Aesthetic Shadowing Agent — フルパイプライン実行
+# Aesthetic Shadowing Agent — フルパイプライン実行（スタンドアロンバッチ版）
+#
+# 【このスクリプトの位置づけ】
+#   photo-selector SKILL フローとは独立した「コマンドライン完結バッチ」。
+#   Stage4 は ANTHROPIC_API_KEY が必要（profile.py を直接呼ぶため）。
+#   SKILL フローでは Step 4 を Claude Code 自身が直接実行するため API キー不要。
+#
+# 【使い分け】
+#   - 対話セッション（Claude Code）: photo-selector SKILL を使う
+#   - バッチ自動実行 / CI: このスクリプトを使う（ANTHROPIC_API_KEY 環境変数が必要）
+#
 # 使い方: ./run_pipeline.sh <jpeg_dir> <xmp_dir> <output_dir> [session_json]
 #
 # 例:
