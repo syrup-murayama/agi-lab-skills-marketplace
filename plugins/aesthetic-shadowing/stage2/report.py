@@ -29,14 +29,17 @@ def load_groups(csv_path: Path) -> list[dict]:
     with open(csv_path, newline='', encoding='utf-8') as f:
         for row in csv.DictReader(f):
             rows.append({
-                'stem':         Path(row['file']).stem,
-                'file':         row['file'],
-                'datetime':     row['datetime'],
-                'group_id':     int(row['group_id']),
-                'group_size':   int(row['group_size']),
-                'position':     row['position'],
-                'bonus_weight': float(row['bonus_weight']),
-                'person_count': int(float(row['person_count'])),
+                'stem':            Path(row['file']).stem,
+                'file':            row['file'],
+                'datetime':        row['datetime'],
+                'group_id':        int(row['group_id']),
+                'group_size':      int(row['group_size']),
+                'position':        row['position'],
+                'bonus_weight':    float(row['bonus_weight']),
+                'person_count':    int(float(row['person_count'])),
+                'sharpness_score': float(row.get('sharpness_score', 0.0)),
+                'exposure_score':  float(row.get('exposure_score', 0.0)),
+                'technical_score': float(row.get('technical_score', 0.0)),
             })
     return rows
 
@@ -66,6 +69,15 @@ BONUS_BAR_COLOR = {
 }
 
 
+def tech_score_color(score: float) -> str:
+    if score >= 0.8:
+        return '#22c55e'   # 緑
+    elif score >= 0.5:
+        return '#f59e0b'   # 黄
+    else:
+        return '#ef4444'   # 赤
+
+
 def make_card(row: dict, jpeg_url: str) -> str:
     pos = row['position']
     badge_color, badge_label = POSITION_STYLE.get(pos, ('#475569', pos.upper()))
@@ -79,6 +91,11 @@ def make_card(row: dict, jpeg_url: str) -> str:
     person_icon = '👤' if n_persons == 1 else ('👥' if n_persons >= 2 else '─')
     person_label = f'{n_persons}人' if n_persons > 0 else '0人'
 
+    tech  = row['technical_score']
+    sharp = row['sharpness_score']
+    expo  = row['exposure_score']
+    tech_color = tech_score_color(tech)
+
     return f'''
 <div class="card pos-{pos}" onclick="openModal('{jpeg_url}','{stem}')">
   <div class="thumb-wrap">
@@ -90,6 +107,10 @@ def make_card(row: dict, jpeg_url: str) -> str:
     <div class="card-meta">
       <span class="card-time">{dt}</span>
       <span class="card-person">{person_icon} {person_label}</span>
+    </div>
+    <div class="tech-row">
+      <span class="tech-main" style="color:{tech_color}">技術 {tech:.2f}</span>
+      <span class="tech-sub">鮮 {sharp:.2f} / 露 {expo:.2f}</span>
     </div>
     <div class="bonus-row">
       <span class="bonus-label">bonus</span>
@@ -106,6 +127,8 @@ def make_group_section(gid: int, members: list[dict], jpeg_dir: Path) -> str:
     size = members[0]['group_size']
     dt_start = members[0]['datetime'][11:19] if members[0]['datetime'] else '?'
     n_persons_avg = sum(m['person_count'] for m in members) / len(members)
+    max_tech = max(m['technical_score'] for m in members)
+    max_tech_color = tech_score_color(max_tech)
 
     cards = '\n'.join(
         make_card(m, find_jpeg(jpeg_dir, m['stem']))
@@ -120,6 +143,7 @@ def make_group_section(gid: int, members: list[dict], jpeg_dir: Path) -> str:
     <span class="gid">Group {gid}</span>
     <span class="gsize">{size}枚</span>
     <span class="gtime">{dt_start}</span>
+    <span class="gtech" style="color:{max_tech_color}">最高技術 {max_tech:.2f}</span>
     <span class="gpersons">👤 {person_summary}</span>
   </div>
   <div class="group-cards">
@@ -146,6 +170,12 @@ def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
     n_first  = sum(1 for r in rows if r['position'] == 'first')
     n_last   = sum(1 for r in rows if r['position'] == 'last')
     n_middle = sum(1 for r in rows if r['position'] == 'middle')
+
+    tech_scores = [r['technical_score'] for r in rows]
+    tech_avg  = sum(tech_scores) / len(tech_scores) if tech_scores else 0.0
+    top10_threshold = sorted(tech_scores, reverse=True)[max(0, len(tech_scores) // 10 - 1)]
+    n_top10  = sum(1 for s in tech_scores if s >= top10_threshold)
+    tech_avg_color = tech_score_color(tech_avg)
 
     return f'''<!DOCTYPE html>
 <html lang="ja">
@@ -196,6 +226,8 @@ def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
   .s-first  .n {{ color: #6366f1; }}
   .s-last   .n {{ color: #06b6d4; }}
   .s-middle .n {{ color: #475569; }}
+  .s-tech   .n {{ color: #22c55e; }}
+  .s-top10  .n {{ color: #22c55e; }}
 
   /* フィルター */
   .filters {{
@@ -256,6 +288,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
   .gid    {{ font-weight: 700; color: #818cf8; min-width: 70px; }}
   .gsize  {{ color: #94a3b8; }}
   .gtime  {{ color: #64748b; }}
+  .gtech  {{ font-size: 0.75rem; font-weight: 600; }}
   .gpersons {{ color: #64748b; margin-left: auto; }}
 
   .group-cards {{
@@ -333,6 +366,15 @@ def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
     align-items: center;
     gap: 5px;
   }}
+  .tech-row {{
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 5px;
+  }}
+  .tech-main {{ font-size: 0.78rem; font-weight: 700; }}
+  .tech-sub  {{ font-size: 0.6rem; color: #475569; }}
+
   .bonus-label {{ font-size: 0.62rem; color: #475569; }}
   .bonus-bg {{
     background: #0a0f1e;
@@ -401,6 +443,12 @@ def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
     </div>
     <div class="stat s-middle">
       <div class="n">{n_middle}</div><div class="l">MIDDLE</div>
+    </div>
+    <div class="stat s-tech">
+      <div class="n" style="color:{tech_avg_color}">{tech_avg:.2f}</div><div class="l">技術平均</div>
+    </div>
+    <div class="stat s-top10">
+      <div class="n" style="color:#22c55e">{n_top10}</div><div class="l">上位10%</div>
     </div>
   </div>
 
