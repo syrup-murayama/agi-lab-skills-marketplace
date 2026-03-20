@@ -78,11 +78,11 @@ if [ -f "$OUT_DIR/rated_samples.json" ]; then
 
   echo ""
 
-  # Stage 6: JPEG メタデータ直接書き出し
-  echo "[Stage 6] JPEG メタデータ直接書き出し (XMP:Rating)..."
+  # Stage 6: メタデータ書き出し (Hybrid: JPEG 直接 / RAW XMP)
+  echo "[Stage 6] メタデータ書き出し (XMP:Rating)..."
   "$VENV" "$(dirname "$0")/stage6/xmp_writer.py" \
     --scores "$OUT_DIR/batch_scores.csv" \
-    --jpeg-dir "$JPEG_DIR"
+    --image-dir "$JPEG_DIR"
 else
   echo "[Stage 4-6] rated_samples.json が見つからないためスキップ。"
   echo "  先に Stage 3 を完了してください。"

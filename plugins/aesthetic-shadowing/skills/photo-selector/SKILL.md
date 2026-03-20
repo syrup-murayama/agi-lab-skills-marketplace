@@ -261,16 +261,19 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 
 ---
 
-### Step 6: JPEG メタデータ直接書き出し
+### Step 6: メタデータ書き出し (Hybrid: JPEG 直接 / RAW XMP)
 
-ExifTool を使用して、JPEG メタデータに直接星レーティングを書き込む。
+ExifTool を使用して、メタデータに星レーティングを書き込む。
+- JPEG/TIFF: ファイル本体を直接更新
+- RAW (CR3/ARW/NEF等): XMP サイドカーファイルを生成/更新
+
 Lightroom Classic で「メタデータをファイルから読み込む」を実行することで反映される。
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage6/xmp_writer.py \
   --scores /tmp/batch_scores.csv \
-  --jpeg-dir <jpeg_dir>
+  --image-dir <image_dir>
 ```
 
 完了後、更新されたファイル数をユーザーに報告する。
@@ -287,7 +290,7 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 | `/tmp/rated_samples.json` | 人間レーティング付きサンプル | Stage4 |
 | `/tmp/aesthetic_profile.json` | Claude生成の審美眼プロファイル | Stage5 |
 | `/tmp/batch_scores.csv` | CLIPスコアリング結果（全カット） | Stage6 |
-| `<jpeg_dir>/*.JPG` | 星レーティングが書き込まれた画像本体 | —（最終出力） |
+| `<image_dir>/*.(JPG|xmp)` | 星レーティングが書き込まれた画像本体またはサイドカー | —（最終出力） |
 
 ---
 

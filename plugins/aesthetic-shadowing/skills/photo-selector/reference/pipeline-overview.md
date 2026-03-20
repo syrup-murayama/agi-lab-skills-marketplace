@@ -35,8 +35,8 @@
    全グループにスタイルルールを適用
        │
        ▼
-   Stage 6: JPEG メタデータ直接書き出し
-   xmp_writer.py → JPEG 本体更新 (ExifTool)
+   Stage 6: メタデータ書き出し (Hybrid)
+   xmp_writer.py → JPEG直接 / RAWサイドカー
    Lightroom Classic 対応 (XMP:Rating)
 ```
 
@@ -157,9 +157,11 @@ filename, group_id, group_type, position_in_group, tech_score, is_representative
 - ローカル CLIP モデルを使用して全カットをスコアリング
 - 出力: `batch_scores.csv`
 
-### Stage 6: JPEG メタデータ直接書き出し
-- ExifTool を使用して、JPEG ファイル本体の `XMP:Rating` を直接書き換える
+### Stage 6: メタデータ書き出し
+- JPEG/TIFF: ExifTool を使用してファイル本体の `XMP:Rating` を直接書き換える
+- RAW (CR3/ARW/NEF等): 同名の `.xmp` サイドカーファイルを生成または更新
 - Lightroom Classic 対応
+
 
 ---
 
