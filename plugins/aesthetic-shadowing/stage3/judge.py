@@ -722,16 +722,23 @@ def _make_handler(app: _AppState):
     return Handler
 
 
-def _find_free_port(start: int) -> int:
-    import socket
-    port = start
-    while True:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("", port))
-                return port
-            except OSError:
-                port += 1
+def _create_server(
+    handler_class,
+    start_port: int,
+    max_tries: int = 10,
+) -> tuple[HTTPServer, int]:
+    """HTTPServer をポート競合なく起動する（TOCTOU回避のため直接バインドで試す）。"""
+    for i in range(max_tries):
+        port = start_port + i
+        try:
+            server = HTTPServer(("127.0.0.1", port), handler_class)
+            return server, port
+        except OSError:
+            if i < max_tries - 1:
+                print(f"ポート {port} は使用中。{port + 1} を試します...")
+    raise OSError(
+        f"ポート {start_port}〜{start_port + max_tries - 1} がすべて使用中です。"
+    )
 
 
 def run_browser_session(
@@ -755,11 +762,17 @@ def run_browser_session(
         print("すべてのサンプルが評価済みです。")
         return
 
-    port = _find_free_port(start_port)
-    server = HTTPServer(("127.0.0.1", port), _make_handler(app))
+    try:
+        server, port = _create_server(_make_handler(app), start_port)
+    except OSError as e:
+        print(f"⚠️  HTTPサーバーの起動に失敗しました: {e}", file=sys.stderr)
+        sys.exit(1)
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
+
+    # serve_forever() の accept ループが始まるまで少し待つ
+    time.sleep(0.2)
 
     url = f"http://localhost:{port}"
     print(f"サーバー起動: {url}")
@@ -768,13 +781,18 @@ def run_browser_session(
 
     # ブラウザを開く
     try:
-        subprocess.Popen(
+        result = subprocess.run(
             ["open", url],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=5,
         )
+        browser_opened = result.returncode == 0
     except Exception:
-        print(f"ブラウザを手動で開いてください: {url}")
+        browser_opened = False
+
+    if not browser_opened:
+        print(f"⚠️  ブラウザを自動起動できませんでした。手動で開いてください: {url}")
 
     # Ctrl+C で中断できるようにシグナルハンドラを設定
     def _handle_interrupt(sig, frame):
