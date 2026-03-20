@@ -123,16 +123,16 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 ### Stage 3: 途中で中断してしまった
 
 **再開方法**: 同じコマンドを再実行する。
-`--output /tmp/rated_samples.json` が既に存在する場合、未レーティングの写真から続きを再開する。
+`--output $OUTPUT_DIR/rated_samples.json` が既に存在する場合、未レーティングの写真から続きを再開する。
 
 ```bash
 # 同じコマンドを再実行するだけでOK
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage3/judge.py \
   <jpeg_dir> \
-  --csv /tmp/stage2_groups.csv \
-  --session /tmp/session.json \
-  --output /tmp/rated_samples.json
+  --csv $OUTPUT_DIR/stage2_groups.csv \
+  --session $OUTPUT_DIR/session.json \
+  --output $OUTPUT_DIR/rated_samples.json
 ```
 
 ---
@@ -146,14 +146,14 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 ```bash
 # タイムスタンプを付けて保存
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
---output /tmp/stage2_groups_${TIMESTAMP}.csv
+--output $OUTPUT_DIR/stage2_groups_${TIMESTAMP}.csv
 ```
 
 ---
 
-### `/tmp` に書き込めない
+### 出力ディレクトリに書き込めない
 
-**対処**: 代替ディレクトリを指定:
+**対処**: 書き込み権限があるディレクトリを `OUTPUT_DIR` として指定する:
 ```bash
 --output ~/Desktop/photo-selector-output/stage2_groups.csv
 ```
