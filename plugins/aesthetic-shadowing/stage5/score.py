@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 5: CLIP バッチスコアリング（複合スコア対応版）
+Stage 5: CLIP バッチスコアリング（複合スコア対応版 + 画像-画像モード）
 
 aesthetic_profile.json の clip_query / high_keywords / low_keywords を使い、
 複合スコアで星レーティング（0〜4）を判定する。
@@ -15,11 +15,16 @@ min-max 正規化について:
   正規化することで相対ランキングを保ちながら全星レンジを活用する。
   --no-normalize で生のクランプ値を使用（旧互換）。
 
+画像-画像モード (--mode image):
+  rated_samples.json の評価済み画像を視覚アンカーとして使用。
+  composite_score = mean_sim(pos) - mean_sim(neg)  → min-max 正規化
+
 使い方:
-  python score.py \\
+  python score.py <jpeg_dir> \\
     --profile <aesthetic_profile.json> \\
-    --jpeg-dir <jpeg_dir> \\
     --output <batch_scores.csv> \\
+    [--mode text|image] \\
+    [--rated-samples <rated_samples.json>] \\
     [--thresholds "0.25,0.45,0.60,0.75"] \\
     [--weights "0.5,0.3,0.2"] \\
     [--no-composite] \\
@@ -85,6 +90,154 @@ def encode_texts(model, tokenizer, texts: list[str], device: str):
 def cosine_to_score(cosine: float) -> float:
     """コサイン類似度 (-1〜1) を 0〜1 に正規化"""
     return (cosine + 1.0) / 2.0
+
+
+def encode_images(model, preprocess, paths: list[Path], device: str):
+    """画像リストを正規化済み特徴量テンソルに変換（バッチ平均）"""
+    import torch
+    from PIL import Image
+
+    feats = []
+    for p in paths:
+        try:
+            img = Image.open(p).convert("RGB")
+            tensor = preprocess(img).unsqueeze(0).to(device)
+            with torch.no_grad():
+                f = model.encode_image(tensor)
+                f = f / f.norm(dim=-1, keepdim=True)
+            feats.append(f)
+        except Exception as e:
+            print(f"  [WARN] アンカー画像スキップ: {p.name}: {e}", file=sys.stderr)
+    if not feats:
+        return None
+    return torch.cat(feats, dim=0)  # (N, D)
+
+
+def load_anchor_embeds(
+    rated_samples_path: Path,
+    jpeg_dir: Path,
+    model,
+    preprocess,
+    device: str,
+):
+    """rated_samples.json から positive/negative アンカー埋め込みを返す"""
+    with open(rated_samples_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    samples = [s for s in data.get("samples", []) if not s.get("skipped")]
+    pos_paths, neg_paths = [], []
+    for s in samples:
+        fname = s.get("file", s.get("path", ""))
+        rating = s.get("human_rating", 0)
+        # パス解決: 絶対パスならそのまま、それ以外は jpeg_dir から解決
+        p = Path(fname)
+        if not p.is_absolute():
+            p = jpeg_dir / p.name
+        if rating >= 4:
+            pos_paths.append(p)
+        elif rating <= 2:
+            neg_paths.append(p)
+
+    print(f"[Stage5] アンカー: positive={len(pos_paths)}枚, negative={len(neg_paths)}枚")
+    pos_embeds = encode_images(model, preprocess, pos_paths, device)
+    neg_embeds = encode_images(model, preprocess, neg_paths, device)
+    return pos_embeds, neg_embeds
+
+
+def run_image_mode(
+    jpeg_dir: Path,
+    rated_samples_path: Path,
+    output_path: Path,
+    thresholds: list[float],
+    normalize: bool,
+    verbose: bool,
+) -> None:
+    """画像-画像 CLIP スコアリング"""
+    import torch
+    import open_clip
+    from PIL import Image
+
+    device = get_device()
+    print(f"[Stage5] デバイス: {device}")
+    print("[Stage5] CLIPモデル (ViT-B-32 / openai) をロード中...")
+
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-32", pretrained="openai"
+    )
+    model = model.to(device)
+    model.eval()
+
+    # アンカー埋め込みを事前計算
+    pos_embeds, neg_embeds = load_anchor_embeds(
+        rated_samples_path, jpeg_dir, model, preprocess, device
+    )
+    if pos_embeds is None:
+        print("[Stage5] ERROR: positive アンカーが 0 枚です", file=sys.stderr)
+        sys.exit(1)
+
+    # ---- JPEG ファイル列挙 ----
+    jpeg_files = sorted(
+        [p for p in jpeg_dir.iterdir() if p.suffix in JPEG_EXTENSIONS]
+    )
+    total = len(jpeg_files)
+    if total == 0:
+        print(f"[Stage5] ERROR: JPEG が見つかりません: {jpeg_dir}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[Stage5] {total} 枚をスコアリング開始（画像-画像モード）")
+
+    results = []
+    for i, jpeg_path in enumerate(jpeg_files, 1):
+        try:
+            img = Image.open(jpeg_path).convert("RGB")
+            tensor = preprocess(img).unsqueeze(0).to(device)
+            with torch.no_grad():
+                img_feat = model.encode_image(tensor)
+                img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+
+                pos_sim = (img_feat @ pos_embeds.T).mean().item()  # mean cosine
+                if neg_embeds is not None:
+                    neg_sim = (img_feat @ neg_embeds.T).mean().item()
+                    raw_score = pos_sim - neg_sim
+                else:
+                    raw_score = pos_sim
+
+            results.append((jpeg_path.name, raw_score, 0.0, 0.0, raw_score, 0))
+
+            if verbose:
+                print(
+                    f"  [{i:4d}/{total}] {jpeg_path.name}"
+                    f"  pos_sim={pos_sim:.4f}"
+                    + (f"  neg_sim={neg_sim:.4f}" if neg_embeds is not None else "")
+                    + f"  raw={raw_score:.4f}"
+                )
+            elif i % 50 == 0 or i == total:
+                print(f"  進捗: {i}/{total} ({100*i//total}%)")
+
+        except Exception as e:
+            print(f"  [WARN] {jpeg_path.name} をスキップ: {e}", file=sys.stderr)
+            results.append((jpeg_path.name, 0.0, 0.0, 0.0, 0.0, 0))
+
+    # ---- min-max 正規化 ----
+    if normalize and results:
+        raw_scores = [r[4] for r in results]
+        c_min, c_max = min(raw_scores), max(raw_scores)
+        c_range = c_max - c_min
+        if c_range > 1e-8:
+            print(f"[Stage5] 正規化: min={c_min:.4f}, max={c_max:.4f}, range={c_range:.4f}")
+            results = [
+                (name, cs, hs, ls, (comp - c_min) / c_range, 0)
+                for name, cs, hs, ls, comp, _ in results
+            ]
+        else:
+            print("[Stage5] WARN: スコアの range が極小のため正規化をスキップ", file=sys.stderr)
+
+    # star_rating を最終スコアから計算
+    results = [
+        (name, cs, hs, ls, comp, score_to_star(comp, thresholds))
+        for name, cs, hs, ls, comp, _ in results
+    ]
+
+    _write_csv_and_summary(output_path, results, total)
 
 
 def run(
@@ -227,6 +380,11 @@ def run(
         for name, cs, hs, ls, comp, _ in results
     ]
 
+    _write_csv_and_summary(output_path, results, total)
+
+
+def _write_csv_and_summary(output_path: Path, results: list, total: int) -> None:
+    """CSV 書き出しとサマリ表示"""
     # ---- CSV 出力 ----
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -256,11 +414,25 @@ def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Stage5: CLIP バッチスコアリング → 星レーティング判定（複合スコア対応）"
+        description="Stage5: CLIP バッチスコアリング → 星レーティング判定（複合スコア / 画像-画像モード対応）"
     )
+    # jpeg_dir は位置引数（省略時は --jpeg-dir で指定可）
+    parser.add_argument("jpeg_dir_pos", nargs="?", default=None, metavar="jpeg_dir",
+                        help="JPEG ディレクトリのパス（位置引数）")
+    parser.add_argument("--jpeg-dir", default=None, help="JPEG ディレクトリのパス（オプション形式）")
     parser.add_argument("--profile", required=True, help="aesthetic_profile.json のパス")
-    parser.add_argument("--jpeg-dir", required=True, help="JPEG ディレクトリのパス")
     parser.add_argument("--output", required=True, help="出力 CSV パス")
+    parser.add_argument(
+        "--mode",
+        choices=["text", "image"],
+        default="text",
+        help="スコアリングモード: text（テキストCLIP）または image（画像-画像CLIP）",
+    )
+    parser.add_argument(
+        "--rated-samples",
+        default=None,
+        help="rated_samples.json のパス（--mode image 時に使用、省略時は --profile と同ディレクトリを探す）",
+    )
     parser.add_argument(
         "--thresholds",
         default=",".join(str(t) for t in DEFAULT_THRESHOLDS),
@@ -284,8 +456,14 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="全ファイルのスコアを表示")
     args = parser.parse_args()
 
+    # jpeg_dir: 位置引数優先、次に --jpeg-dir
+    jpeg_dir_str = args.jpeg_dir_pos or args.jpeg_dir
+    if not jpeg_dir_str:
+        print("ERROR: JPEG ディレクトリを位置引数または --jpeg-dir で指定してください", file=sys.stderr)
+        sys.exit(1)
+
     profile_path = Path(args.profile)
-    jpeg_dir = Path(args.jpeg_dir)
+    jpeg_dir = Path(jpeg_dir_str)
     output_path = Path(args.output)
 
     if not profile_path.exists():
@@ -306,16 +484,36 @@ def main() -> None:
     venv_pip = script_dir.parent / "stage1" / ".venv" / "bin" / "pip"
     ensure_open_clip(str(venv_pip) if venv_pip.exists() else "pip")
 
-    run(
-        profile_path,
-        jpeg_dir,
-        output_path,
-        thresholds,
-        weights,
-        use_composite=not args.no_composite,
-        normalize=not args.no_normalize,
-        verbose=args.verbose,
-    )
+    if args.mode == "image":
+        # rated_samples.json の解決
+        if args.rated_samples:
+            rated_path = Path(args.rated_samples)
+        else:
+            rated_path = profile_path.parent / "rated_samples.json"
+        if not rated_path.exists():
+            print(f"ERROR: rated_samples.json が見つかりません: {rated_path}", file=sys.stderr)
+            print("  --rated-samples オプションでパスを指定してください", file=sys.stderr)
+            sys.exit(1)
+        print(f"[Stage5] モード: 画像-画像 CLIP  (rated_samples: {rated_path})")
+        run_image_mode(
+            jpeg_dir,
+            rated_path,
+            output_path,
+            thresholds,
+            normalize=not args.no_normalize,
+            verbose=args.verbose,
+        )
+    else:
+        run(
+            profile_path,
+            jpeg_dir,
+            output_path,
+            thresholds,
+            weights,
+            use_composite=not args.no_composite,
+            normalize=not args.no_normalize,
+            verbose=args.verbose,
+        )
 
 
 if __name__ == "__main__":

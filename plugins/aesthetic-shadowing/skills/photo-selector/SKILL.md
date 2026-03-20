@@ -131,7 +131,7 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 
 Claudeはユーザーに事前に案内する:
 > 「ブラウザが開きます。写真が1枚ずつ表示されるので、1〜5でレーティングしてください。
-> 迷ったら直感で構いません。6分ほどで完了します。完了するとブラウザが自動で閉じます。」
+> 迷ったら直感で構いません。完了するとブラウザが自動で閉じます。」
 
 以下のコマンドを**フォアグラウンドで実行**する（ブロッキング）。
 ユーザーがブラウザで全枚数を評価すると judge.py が自動終了し、次のステップへ進める。
@@ -144,6 +144,20 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   --session /tmp/session.json \
   --output /tmp/rated_samples.json
 ```
+
+**`--samples` オプション（省略時は `auto`）**
+
+デフォルトの `auto` では全グループ数の10%を基準にサンプル数を自動算出し、最小20枚・最大50枚でクランプする。
+
+| 総撮影枚数の目安 | グループ数 | 評価枚数（auto） |
+|----------------|-----------|----------------|
+| 〜100枚       | 〜50       | 20枚           |
+| 300枚程度      | 〜150      | 20枚           |
+| 600〜700枚    | 〜300      | 30枚           |
+| 1,200枚以上   | 500+       | 50枚           |
+
+枚数が多いほど Stage5 CLIP の識別精度は上がるが、人間の評価負担も増える。
+撮影量・締切・用途に応じて `--samples 数値` でオーバーライド可能。
 
 **重要: バックグラウンド実行（`&` や `run_in_background`）は使わない。**
 フォアグラウンドで待機することで、完了を自動検知できる。
@@ -214,6 +228,13 @@ Read ツールで画像として読み込む（パス: `<jpeg_dir>/<file>`）。
 
 ローカルCLIPモデルで全カットをスコアリングする（APIコストゼロ）。
 
+score.py には2つのモードがある:
+
+- **`--mode text`（デフォルト）**: `aesthetic_profile.json` のテキストキーワードを視覚アンカーとして使う。セットアップが不要で即実行できる。
+- **`--mode image`（推奨）**: `rated_samples.json` の評価済み画像そのものを視覚アンカーとして使う。実際の評価サンプルがある場合はこちらのほうが精度が高い（★4 recall: テキスト45% → 画像82%）。
+
+**テキストモード（デフォルト）**
+
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage5/score.py \
@@ -222,6 +243,21 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   --output /tmp/batch_scores.csv \
   --verbose
 ```
+
+**画像-画像モード（撮影者のサンプルがある場合に推奨）**
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
+  ${CLAUDE_PLUGIN_ROOT}/../../stage5/score.py \
+  --profile /tmp/aesthetic_profile.json \
+  --rated-samples /tmp/rated_samples.json \
+  --jpeg-dir <jpeg_dir> \
+  --output /tmp/batch_scores.csv \
+  --mode image \
+  --verbose
+```
+
+`rated_samples.json` が存在する場合は `--mode image` を優先して使うこと。
 
 ---
 

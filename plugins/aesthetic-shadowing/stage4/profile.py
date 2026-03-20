@@ -98,7 +98,38 @@ def build_text_prompt(
     high: list[dict],
     low: list[dict],
     stats: dict,
+    lang: str = "ja",
 ) -> str:
+    if lang == "en":
+        return f"""You are an assistant that analyzes a photographer's aesthetic sensibility.
+
+## Session Info
+- Session name: {session_name or "(unnamed)"}
+- Shooting intent: {intent or "(not set)"}
+
+## Rating Statistics
+- Total rated: {stats['total_rated']} photos
+- High rating (★4-5): {stats['high_count']} photos
+- Low rating (★1-2): {stats['low_count']} photos
+- Average rating: {stats['avg_rating']}
+
+## High-rated Samples (★4-5)
+{_sample_lines(high)}
+
+## Low-rated Samples (★1-2)
+{_sample_lines(low)}
+
+---
+
+Based on the above information, generate the following JSON in **English**.
+Output JSON only, without markdown code blocks.
+
+{{
+  "profile_text": "3-5 sentences describing the tendencies of high-rated and low-rated photos",
+  "clip_query": "A short query string for CLIP search in Stage5 (max 10 words)",
+  "high_keywords": ["3-6 keywords common to high-rated photos"],
+  "low_keywords": ["3-6 keywords common to low-rated photos"]
+}}"""
     return f"""あなたはプロフォトグラファーの審美眼を分析するアシスタントです。
 
 ## セッション情報
@@ -136,7 +167,33 @@ def build_vision_prompt(
     high: list[dict],
     low: list[dict],
     stats: dict,
+    lang: str = "ja",
 ) -> str:
+    if lang == "en":
+        return f"""You are an assistant that analyzes a photographer's aesthetic sensibility.
+
+All attached images have been rated **high (★4-5)**.
+
+## Session Info
+- Session name: {session_name or "(unnamed)"}
+- Shooting intent: {intent or "(not set)"}
+- Total rated: {stats['total_rated']} / High: {stats['high_count']} / Low: {stats['low_count']}
+- Average rating: {stats['avg_rating']}
+
+## Low-rated Reference (★1-2, no images)
+{_sample_lines(low[:5])}
+
+---
+
+Visually analyze the images and generate the following JSON in **English**.
+Output JSON only, without markdown code blocks.
+
+{{
+  "profile_text": "3-5 sentences describing the visual tendencies and commonalities of high-rated photos",
+  "clip_query": "A short query string for CLIP search in Stage5 (max 10 words)",
+  "high_keywords": ["3-6 keywords based on visual characteristics of high-rated photos"],
+  "low_keywords": ["3-6 keywords presumably common in low-rated photos"]
+}}"""
     return f"""あなたはプロフォトグラファーの審美眼を分析するアシスタントです。
 
 添付した画像はすべて **高評価（★4〜5）** と評価された写真です。
@@ -172,8 +229,9 @@ def call_text_mode(
     high: list[dict],
     low: list[dict],
     stats: dict,
+    lang: str = "ja",
 ) -> dict:
-    prompt = build_text_prompt(session_name, intent, high, low, stats)
+    prompt = build_text_prompt(session_name, intent, high, low, stats, lang=lang)
     print("Claude API を呼び出し中（テキストモード）...", flush=True)
 
     response = client.messages.create(
@@ -192,6 +250,7 @@ def call_vision_mode(
     low: list[dict],
     stats: dict,
     jpeg_dir: Path,
+    lang: str = "ja",
 ) -> dict:
     # 高評価画像を最大 MAX_VISION_IMAGES 枚選ぶ（learning_weight 降順）
     high_sorted = sorted(high, key=lambda s: s.get("learning_weight", 0), reverse=True)
@@ -205,7 +264,7 @@ def call_vision_mode(
 
     if not selected:
         print("警告: 高評価画像が見つかりません。テキストモードにフォールバックします。", file=sys.stderr)
-        return call_text_mode(client, session_name, intent, high, low, stats)
+        return call_text_mode(client, session_name, intent, high, low, stats, lang=lang)
 
     print(f"Claude API を呼び出し中（ビジョンモード、{len(selected)}枚）...", flush=True)
 
@@ -227,7 +286,7 @@ def call_vision_mode(
             "text": f"↑ {s['file']}  rating={s['human_rating']}  tech={s['technical_score']:.3f}",
         })
 
-    prompt_text = build_vision_prompt(session_name, intent, high, low, stats)
+    prompt_text = build_vision_prompt(session_name, intent, high, low, stats, lang=lang)
     content.append({"type": "text", "text": prompt_text})
 
     response = client.messages.create(
@@ -276,6 +335,8 @@ def main() -> None:
                         help="JPEG 画像ディレクトリ（--mode vision 時に必須）")
     parser.add_argument("--mode",     choices=["text", "vision"], default="text",
                         help="text: テキストのみ / vision: 高評価画像を Claude に渡す")
+    parser.add_argument("--lang",     choices=["ja", "en"], default="ja",
+                        help="出力言語 ja: 日本語（デフォルト）/ en: 英語（CLIP用）")
     parser.add_argument("--output",   default="aesthetic_profile.json",
                         help="出力 JSON ファイル名")
     args = parser.parse_args()
@@ -337,9 +398,9 @@ def main() -> None:
 
     # Claude API 呼び出し
     if args.mode == "vision":
-        claude_result = call_vision_mode(client, session_name, intent, high, low, stats, jpeg_dir)
+        claude_result = call_vision_mode(client, session_name, intent, high, low, stats, jpeg_dir, lang=args.lang)
     else:
-        claude_result = call_text_mode(client, session_name, intent, high, low, stats)
+        claude_result = call_text_mode(client, session_name, intent, high, low, stats, lang=args.lang)
 
     # プロファイル組み立て
     profile = {
