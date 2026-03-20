@@ -1,104 +1,56 @@
 #!/usr/bin/env python3
 """
-Stage 6: XMP サイドカー書き出し
+Stage 6: JPEG メタデータ直接書き込み (ExifTool 使用)
 
-batch_scores.csv の星レーティングを XMP サイドカーファイルに書き込む。
-Lightroom がそのまま読み込めるフォーマット。
+batch_scores.csv の星レーティングを JPEG ファイルの XMP:Rating に直接書き込む。
+Lightroom Classic で「メタデータをファイルから読み込む」を実行することで反映される。
 
 使い方:
   python xmp_writer.py \\
     --scores <batch_scores.csv> \\
-    --xmp-dir <output_xmp_dir> \\
-    [--overwrite]
+    --jpeg-dir <input_jpeg_dir>
 
 例:
   python xmp_writer.py \\
     --scores /path/to/batch_scores.csv \\
-    --xmp-dir /path/to/xmp_output/ \\
-    --overwrite
+    --jpeg-dir /path/to/S2_JPEG/
 """
 
 import argparse
 import csv
-import re
+import subprocess
 import sys
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
 
-# ---- XMP 名前空間 ----
-NS = {
-    "x":      "adobe:ns:meta/",
-    "rdf":    "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
-    "xmp":    "http://ns.adobe.com/xap/1.0/",
-    "xmpDM":  "http://ns.adobe.com/xmp/1.0/DynamicMedia/",
-}
-
-XMP_TEMPLATE = """\
-<x:xmpmeta xmlns:x="adobe:ns:meta/">
-  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-    <rdf:Description rdf:about=""
-      xmlns:xmp="http://ns.adobe.com/xap/1.0/"
-      xmlns:xmpDM="http://ns.adobe.com/xmp/1.0/DynamicMedia/">
-      <xmp:Rating>{rating}</xmp:Rating>
-    </rdf:Description>
-  </rdf:RDF>
-</x:xmpmeta>
-"""
-
-
-def update_or_create_xmp(xmp_path: Path, star_rating: int, overwrite: bool) -> str:
+def update_jpeg_rating(jpeg_path: Path, star_rating: int) -> bool:
     """
-    XMP ファイルを更新または新規作成する。
-
-    - 既存ファイルがある場合: xmp:Rating だけ更新し、他フィールド（xmpDM:pick など）を保持
-    - ファイルがない場合: 新規作成
-    - overwrite=False かつ既存ファイルあり: スキップ
-
-    戻り値: "created" | "updated" | "skipped"
+    ExifTool を使用して JPEG の XMP:Rating を更新する。
     """
-    if xmp_path.exists() and not overwrite:
-        return "skipped"
+    if not jpeg_path.exists():
+        print(f"  [WARN] ファイルが見つかりません: {jpeg_path}", file=sys.stderr)
+        return False
 
-    if xmp_path.exists():
-        return _update_existing_xmp(xmp_path, star_rating)
-    else:
-        return _create_new_xmp(xmp_path, star_rating)
-
-
-def _create_new_xmp(xmp_path: Path, star_rating: int) -> str:
-    xmp_path.parent.mkdir(parents=True, exist_ok=True)
-    xmp_path.write_text(XMP_TEMPLATE.format(rating=star_rating), encoding="utf-8")
-    return "created"
-
-
-def _update_existing_xmp(xmp_path: Path, star_rating: int) -> str:
-    """既存 XMP の xmp:Rating だけを更新する（他フィールド保持）"""
-    content = xmp_path.read_text(encoding="utf-8")
-
-    # xmp:Rating タグが既に存在する場合は正規表現で置換（XML パーサーが名前空間で崩れる場合を考慮）
-    rating_pattern = re.compile(r"<xmp:Rating>\d+</xmp:Rating>")
-    if rating_pattern.search(content):
-        new_content = rating_pattern.sub(f"<xmp:Rating>{star_rating}</xmp:Rating>", content)
-        xmp_path.write_text(new_content, encoding="utf-8")
-        return "updated"
-
-    # xmp:Rating がない場合: </rdf:Description> の直前に挿入
-    insert_tag = f"      <xmp:Rating>{star_rating}</xmp:Rating>\n"
-    close_desc = "</rdf:Description>"
-    if close_desc in content:
-        new_content = content.replace(close_desc, insert_tag + close_desc, 1)
-        xmp_path.write_text(new_content, encoding="utf-8")
-        return "updated"
-
-    # 構造が想定外の場合は上書き
-    _create_new_xmp(xmp_path, star_rating)
-    return "updated"
+    try:
+        # exiftool -XMP:Rating=N -overwrite_original path
+        # -overwrite_original を指定しないと _original バックアップが作成される
+        cmd = [
+            "exiftool",
+            f"-XMP:Rating={star_rating}",
+            "-overwrite_original",
+            str(jpeg_path)
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  [ERROR] ExifTool 実行失敗 ({jpeg_path.name}): {e.stderr}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"  [ERROR] 予期せぬエラー ({jpeg_path.name}): {e}", file=sys.stderr)
+        return False
 
 
-def run(scores_path: Path, xmp_dir: Path, overwrite: bool) -> None:
-    xmp_dir.mkdir(parents=True, exist_ok=True)
-
+def run(scores_path: Path, jpeg_dir: Path) -> None:
     # CSV 読み込み
     with open(scores_path, encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
@@ -109,11 +61,9 @@ def run(scores_path: Path, xmp_dir: Path, overwrite: bool) -> None:
         sys.exit(1)
 
     total = len(rows)
-    counts = {"created": 0, "updated": 0, "skipped": 0, "error": 0}
+    counts = {"updated": 0, "error": 0}
 
-    print(f"[Stage6] {total} 件の XMP を書き出します → {xmp_dir}")
-    if not overwrite:
-        print("[Stage6] 既存 XMP はスキップします（上書きするには --overwrite）")
+    print(f"[Stage6] {total} 件の JPEG メタデータを更新します (dir: {jpeg_dir})")
 
     for i, row in enumerate(rows, 1):
         filename = row.get("filename", "")
@@ -128,44 +78,51 @@ def run(scores_path: Path, xmp_dir: Path, overwrite: bool) -> None:
             counts["error"] += 1
             continue
 
-        stem = Path(filename).stem
-        xmp_path = xmp_dir / f"{stem}.xmp"
-
-        try:
-            status = update_or_create_xmp(xmp_path, star_rating, overwrite)
-            counts[status] += 1
-        except Exception as e:
-            print(f"  [WARN] {filename} → {e}", file=sys.stderr)
+        jpeg_path = jpeg_dir / filename
+        
+        if update_jpeg_rating(jpeg_path, star_rating):
+            counts["updated"] += 1
+        else:
             counts["error"] += 1
 
-        if i % 50 == 0 or i == total:
+        if i % 20 == 0 or i == total:
             print(f"  進捗: {i}/{total} ({100*i//total}%)")
 
-    print(f"[Stage6] 完了: 新規={counts['created']} 更新={counts['updated']} "
-          f"スキップ={counts['skipped']} エラー={counts['error']}")
+    print(f"[Stage6] 完了: 更新={counts['updated']} エラー={counts['error']}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Stage6: batch_scores.csv → XMP サイドカー書き出し"
+        description="Stage6: batch_scores.csv → JPEG メタデータ (XMP:Rating) 直接書き込み"
     )
     parser.add_argument("--scores", required=True, help="batch_scores.csv のパス")
-    parser.add_argument("--xmp-dir", required=True, help="XMP 出力ディレクトリ")
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="既存 XMP を上書き（デフォルトはスキップ）",
-    )
+    parser.add_argument("--jpeg-dir", required=True, help="JPEG ファイルが格納されているディレクトリ")
+    
+    # 互換性のために残すが、現在は使用しない（または警告を出す）
+    parser.add_argument("--xmp-dir", help="使用されません (旧互換用)")
+    parser.add_argument("--overwrite", action="store_true", help="使用されません (ExifTool は常に上書きします)")
+    
     args = parser.parse_args()
 
     scores_path = Path(args.scores)
-    xmp_dir = Path(args.xmp_dir)
+    jpeg_dir = Path(args.jpeg_dir)
 
     if not scores_path.exists():
         print(f"ERROR: CSVが見つかりません: {scores_path}", file=sys.stderr)
         sys.exit(1)
 
-    run(scores_path, xmp_dir, args.overwrite)
+    if not jpeg_dir.is_dir():
+        print(f"ERROR: JPEGディレクトリが見つかりません: {jpeg_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    # exiftool の存在確認
+    try:
+        subprocess.run(["exiftool", "-ver"], check=True, capture_output=True)
+    except Exception:
+        print("ERROR: exiftool がインストールされていないか、パスが通っていません。", file=sys.stderr)
+        sys.exit(1)
+
+    run(scores_path, jpeg_dir)
 
 
 if __name__ == "__main__":

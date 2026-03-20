@@ -78,12 +78,11 @@ if [ -f "$OUT_DIR/rated_samples.json" ]; then
 
   echo ""
 
-  # Stage 6: XMP星レーティング書き出し
-  echo "[Stage 6] XMP星レーティング書き出し..."
+  # Stage 6: JPEG メタデータ直接書き出し
+  echo "[Stage 6] JPEG メタデータ直接書き出し (XMP:Rating)..."
   "$VENV" "$(dirname "$0")/stage6/xmp_writer.py" \
     --scores "$OUT_DIR/batch_scores.csv" \
-    --xmp-dir "$OUT_DIR/xmp_rated" \
-    --overwrite
+    --jpeg-dir "$JPEG_DIR"
 else
   echo "[Stage 4-6] rated_samples.json が見つからないためスキップ。"
   echo "  先に Stage 3 を完了してください。"
@@ -96,5 +95,5 @@ echo "  rated_samples.json  → $OUT_DIR/rated_samples.json"
 if [ -f "$OUT_DIR/aesthetic_profile.json" ]; then
   echo "  aesthetic_profile.json → $OUT_DIR/aesthetic_profile.json"
   echo "  batch_scores.csv    → $OUT_DIR/batch_scores.csv"
-  echo "  xmp_rated/          → $OUT_DIR/xmp_rated/"
+  echo "  (JPEG メタデータが更新されました)"
 fi

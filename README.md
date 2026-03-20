@@ -18,7 +18,7 @@ Aesthetic Shadowingは、その仕事を代行する。
 | `/photo-selector` と打つ | 撮影意図（運動会・学校PR・結婚式など）を確認する |
 | 「運動会の写真です」と答える | 技術的失敗カット（ピンボケ・白飛び・黒潰れ）を自動除外する |
 | 30枚にレーティングをつける | その判断からあなたの審美眼を学習する |
-| 待つ | 残り2470枚を自律的に採点し、XMPサイドカーをLightroomに書き出す |
+| 待つ | 残り2470枚を自律的に採点し、JPEG メタデータに星レーティングを直接書き出す |
 
 **人間の関与時間：常に約6分。**
 30枚でも3000枚でも、変わらない。
@@ -133,7 +133,8 @@ Aesthetic Shadowing
 │  Stage 4〜6: 全件自動採点 → 出力（Claude + ローカルCLIP）        │
 │  Stage4: Claude が審美眼プロファイルを生成（APIキー不要）         │
 │  Stage5: ローカルCLIPで全カットをスコアリング（APIコストゼロ）    │
-│  Stage6: XMPサイドカーをLightroomに直接書き出し                  │
+│  Stage 6: JPEG メタデータ（XMP:Rating）を直接書き出し              │
+
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -175,7 +176,7 @@ composite = 0.5 × CLIP類似度
 
 - ローカル処理: Python, OpenCV, Rawpy, ExifTool, imagehash
 - LLM: Claude（マルチモーダル）
-- 出力: XMP Sidecarファイル（Adobe Lightroom連携）
+- 出力: JPEG メタデータ直接書き出し（Adobe Lightroom連携）
 
 ---
 
@@ -206,7 +207,7 @@ composite = 0.5 × CLIP類似度
 | Stage 3: 審美眼学習 | ✅ 完成 | 代表30枚をレーティング → スタイルルール抽出 |
 | Stage 4: プロファイル生成 | ✅ 完成 | Claude が直接実行（APIキー不要） |
 | Stage 5: CLIPスコアリング | ✅ 完成 | ローカルCLIPで全カットをバッチ採点 |
-| Stage 6: XMP書き出し | ✅ 完成 | Lightroom対応サイドカーを自動生成 |
+| Stage 6: メタデータ書き出し | ✅ 完成 | ExifTool を使用して直接書き込み |
 
 ---
 
