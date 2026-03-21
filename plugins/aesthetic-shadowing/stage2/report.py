@@ -97,12 +97,16 @@ def make_card(row: dict, jpeg_url: str) -> str:
     sharp = row['sharpness_score']
     expo  = row['exposure_score']
     tech_color = tech_score_color(tech)
+    gid = row['group_id']
 
     return f'''
-<div class="card pos-{pos}" onclick="openModal('{jpeg_url}','{stem}')">
+<div class="card pos-{pos}" data-stem="{stem}" data-gid="{gid}" data-url="{jpeg_url}"
+     onclick="openModal('{jpeg_url}','{stem}',{gid})">
   <div class="thumb-wrap">
     <img src="{jpeg_url}" alt="{stem}" loading="lazy">
     <span class="pos-badge" style="background:{badge_color}">{badge_label}</span>
+    <div class="select-overlay" id="sol-{stem}"></div>
+    <button class="select-badge" id="sbadge-{stem}" onclick="toggleSelect(event,'{stem}')" title="セレクト切り替え"></button>
   </div>
   <div class="card-info">
     <div class="card-name">{stem}</div>
@@ -198,6 +202,13 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     session_panel_html = make_session_panel(session_info) if session_info else ''
     # JS用: session_noteの初期値（JSON文字列としてエスケープ）
     session_note_init = json.dumps(session_info.get('session_note', '') if session_info else '')
+
+    # JS用: 全ショットリスト（グループ順）
+    all_shots_json = json.dumps(
+        [{'url': find_jpeg(jpeg_dir, r['stem']), 'stem': r['stem'], 'gid': r['group_id']}
+         for r in sorted_rows],
+        ensure_ascii=False,
+    )
 
     return f'''<!DOCTYPE html>
 <html lang="ja">
@@ -352,18 +363,6 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   }}
   .card:hover .thumb-wrap img {{ transform: scale(1.04); }}
 
-  .pos-badge {{
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.62rem;
-    font-weight: 800;
-    color: #fff;
-    letter-spacing: 0.05em;
-  }}
-
   .card-info {{ padding: 8px 10px; }}
   .card-name {{
     font-size: 0.68rem;
@@ -407,6 +406,77 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   .bonus-bar {{ height: 100%; border-radius: 3px; }}
   .bonus-val {{ font-size: 0.62rem; color: #94a3b8; text-align: right; }}
 
+  /* セレクトオーバーレイ・バッジ */
+  .select-overlay {{
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    transition: background 0.15s;
+  }}
+  .select-overlay.sel-pick   {{ background: rgba(34,197,94,0.35); }}
+  .select-overlay.sel-hold   {{ background: rgba(245,158,11,0.35); }}
+  .select-overlay.sel-reject {{ background: rgba(239,68,68,0.35); }}
+
+  .select-badge {{
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(255,255,255,0.1);
+    color: #fff;
+    font-size: 0.78rem;
+    font-weight: 800;
+    cursor: pointer;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.1s, background 0.15s;
+    line-height: 1;
+    padding: 0;
+  }}
+  .select-badge:hover {{ transform: scale(1.2); }}
+  .select-badge.sel-pick   {{ background: #22c55e; }}
+  .select-badge.sel-hold   {{ background: #f59e0b; }}
+  .select-badge.sel-reject {{ background: #ef4444; }}
+
+  /* pos-badge を左上に移動（select-badge と重ならないよう） */
+  .pos-badge {{
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.62rem;
+    font-weight: 800;
+    color: #fff;
+    letter-spacing: 0.05em;
+  }}
+
+  /* サマリーバー */
+  .select-summary {{
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: #0f1829;
+    border: 1px solid #1e2d45;
+    border-radius: 8px;
+    padding: 8px 16px;
+    font-size: 0.82rem;
+    color: #64748b;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }}
+  .sel-sum-label {{ color: #475569; margin-right: 4px; }}
+  .sel-sum-pick   {{ color: #22c55e; font-weight: 700; }}
+  .sel-sum-hold   {{ color: #f59e0b; font-weight: 700; }}
+  .sel-sum-reject {{ color: #ef4444; font-weight: 700; }}
+  .sel-sum-none   {{ color: #475569; }}
+  .sel-sum-sep    {{ color: #1e2d45; }}
+
   /* モーダル */
   .modal {{
     display: none;
@@ -422,11 +492,19 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   .modal.open {{ display: flex; }}
   .modal img {{
     max-width: 92vw;
-    max-height: 86vh;
+    max-height: 82vh;
     border-radius: 6px;
     box-shadow: 0 8px 40px rgba(0,0,0,0.7);
   }}
-  .modal-name {{ color: #94a3b8; font-size: 0.8rem; }}
+  .modal-footer {{
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }}
+  .modal-name {{ color: #94a3b8; font-size: 0.82rem; }}
+  .modal-hint {{ color: #475569; font-size: 0.72rem; }}
   .modal-close {{
     position: absolute;
     top: 14px; right: 18px;
@@ -536,6 +614,16 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
 
 <div class="content">
 {session_panel_html}
+  <div class="select-summary" id="select-summary">
+    <span class="sel-sum-label">セレクト:</span>
+    採用 <span class="sel-sum-pick" id="cnt-pick">0</span>
+    <span class="sel-sum-sep">/</span>
+    保留 <span class="sel-sum-hold" id="cnt-hold">0</span>
+    <span class="sel-sum-sep">/</span>
+    不採用 <span class="sel-sum-reject" id="cnt-reject">0</span>
+    <span class="sel-sum-sep">/</span>
+    未選択 <span class="sel-sum-none" id="cnt-none">{n_shots}</span>
+  </div>
   <div class="counter" id="counter">表示: {n_groups} グループ</div>
   <div id="groups">
 {groups_html}
@@ -546,10 +634,14 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
 <div class="modal" id="modal" onclick="closeModal(event)">
   <button class="modal-close" onclick="closeModal()">&#x2715;</button>
   <img id="modal-img" src="" alt="">
-  <div class="modal-name" id="modal-name"></div>
+  <div class="modal-footer">
+    <span class="modal-name" id="modal-name"></span>
+    <span class="modal-hint">← → 同グループ内 &nbsp;|&nbsp; J/K 全体移動 &nbsp;|&nbsp; 1=✗ &nbsp;3=△ &nbsp;5=✓</span>
+  </div>
 </div>
 
 <script>
+// ---- フィルター ----
 function setFilter(type, btn) {{
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
@@ -573,20 +665,139 @@ function jumpTo(val) {{
   document.getElementById('jump-input').value = '';
 }}
 
-function openModal(url, name) {{
+// ---- モーダル ----
+const ALL_SHOTS = {all_shots_json};
+let currentShotIdx = -1;
+
+function openModal(url, name, gid) {{
+  currentShotIdx = ALL_SHOTS.findIndex(s => s.stem === name);
   document.getElementById('modal-img').src = url;
   document.getElementById('modal-name').textContent = name;
   document.getElementById('modal').classList.add('open');
 }}
+
 function closeModal(e) {{
   if (!e || e.target === document.getElementById('modal')) {{
     document.getElementById('modal').classList.remove('open');
     document.getElementById('modal-img').src = '';
   }}
 }}
-document.addEventListener('keydown', e => {{ if (e.key === 'Escape') closeModal(); }});
 
-// セッションメモ localStorage 自動保存
+function navigateModal(shot) {{
+  currentShotIdx = ALL_SHOTS.findIndex(s => s.stem === shot.stem);
+  document.getElementById('modal-img').src = shot.url;
+  document.getElementById('modal-name').textContent = shot.stem;
+}}
+
+document.addEventListener('keydown', function(e) {{
+  const modal = document.getElementById('modal');
+  const isOpen = modal.classList.contains('open');
+
+  if (!isOpen) return;
+
+  if (e.key === 'Escape') {{ closeModal(); return; }}
+
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {{
+    e.preventDefault();
+    if (currentShotIdx < 0) return;
+    const curGid = ALL_SHOTS[currentShotIdx].gid;
+    const groupShots = ALL_SHOTS.filter(s => s.gid === curGid);
+    const groupIdx = groupShots.findIndex(s => s.stem === ALL_SHOTS[currentShotIdx].stem);
+    const delta = e.key === 'ArrowRight' ? 1 : -1;
+    const nextGroupIdx = groupIdx + delta;
+    if (nextGroupIdx >= 0 && nextGroupIdx < groupShots.length) {{
+      navigateModal(groupShots[nextGroupIdx]);
+    }}
+    return;
+  }}
+
+  if (e.key === 'j' || e.key === 'J') {{
+    e.preventDefault();
+    if (currentShotIdx < ALL_SHOTS.length - 1) navigateModal(ALL_SHOTS[currentShotIdx + 1]);
+    return;
+  }}
+  if (e.key === 'k' || e.key === 'K') {{
+    e.preventDefault();
+    if (currentShotIdx > 0) navigateModal(ALL_SHOTS[currentShotIdx - 1]);
+    return;
+  }}
+
+  if (e.key === '1') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'reject'); return; }}
+  if (e.key === '3') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'hold');   return; }}
+  if (e.key === '5') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'pick');   return; }}
+}});
+
+// ---- セレクト管理 ----
+const SELECT_FILENAME = window.location.pathname.split('/').pop() || 'report.html';
+const SELECT_KEY = 'asa-select-' + SELECT_FILENAME;
+let selectState = {{}};
+
+function loadSelectState() {{
+  try {{
+    const saved = localStorage.getItem(SELECT_KEY);
+    selectState = saved ? JSON.parse(saved) : {{}};
+  }} catch(e) {{ selectState = {{}}; }}
+}}
+
+function saveSelectState() {{
+  localStorage.setItem(SELECT_KEY, JSON.stringify(selectState));
+}}
+
+function toggleSelect(e, stem) {{
+  e.stopPropagation();
+  const cycle = {{ 'pick': 'hold', 'hold': 'reject', 'reject': null }};
+  const current = selectState[stem];
+  const next = (current in cycle) ? cycle[current] : 'pick';
+  setSelect(stem, next);
+}}
+
+function setSelect(stem, state) {{
+  if (state === null || state === undefined) {{
+    delete selectState[stem];
+  }} else {{
+    selectState[stem] = state;
+  }}
+  saveSelectState();
+  updateCardVisual(stem);
+  updateSummary();
+}}
+
+function updateCardVisual(stem) {{
+  const overlay = document.getElementById('sol-' + stem);
+  const badge   = document.getElementById('sbadge-' + stem);
+  if (!overlay || !badge) return;
+
+  const state = selectState[stem];
+  overlay.className = 'select-overlay';
+  badge.className   = 'select-badge';
+  badge.textContent = '';
+
+  if (state === 'pick')   {{ overlay.classList.add('sel-pick');   badge.classList.add('sel-pick');   badge.textContent = '✓'; }}
+  if (state === 'hold')   {{ overlay.classList.add('sel-hold');   badge.classList.add('sel-hold');   badge.textContent = '△'; }}
+  if (state === 'reject') {{ overlay.classList.add('sel-reject'); badge.classList.add('sel-reject'); badge.textContent = '✗'; }}
+}}
+
+function updateSummary() {{
+  const total = ALL_SHOTS.length;
+  let pick = 0, hold = 0, reject = 0;
+  for (const v of Object.values(selectState)) {{
+    if (v === 'pick')   pick++;
+    else if (v === 'hold')   hold++;
+    else if (v === 'reject') reject++;
+  }}
+  const none = total - pick - hold - reject;
+  document.getElementById('cnt-pick').textContent   = pick;
+  document.getElementById('cnt-hold').textContent   = hold;
+  document.getElementById('cnt-reject').textContent = reject;
+  document.getElementById('cnt-none').textContent   = none;
+}}
+
+// 初期化
+loadSelectState();
+ALL_SHOTS.forEach(s => updateCardVisual(s.stem));
+updateSummary();
+
+// ---- セッションメモ localStorage 自動保存 ----
 (function() {{
   const textarea = document.getElementById('session-note');
   if (!textarea) return;
@@ -594,11 +805,9 @@ document.addEventListener('keydown', e => {{ if (e.key === 'Escape') closeModal(
   const storageKey = 'asa-session-note-' + filename;
   const initNote = {session_note_init};
 
-  // 復元: localStorage 優先、なければ session_note 初期値
   const saved = localStorage.getItem(storageKey);
   textarea.value = (saved !== null) ? saved : initNote;
 
-  // debounce 保存
   let timer;
   textarea.addEventListener('input', function() {{
     clearTimeout(timer);
