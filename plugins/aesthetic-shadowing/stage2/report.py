@@ -57,37 +57,17 @@ def find_jpeg(jpeg_dir: Path, stem: str) -> str:
 
 # ---------- カード生成 ----------
 
-POSITION_STYLE = {
-    'first':  ('#6366f1', 'FIRST'),
-    'last':   ('#06b6d4', 'LAST'),
-    'middle': ('#475569', 'MID'),
-    'solo':   ('#f59e0b', 'SOLO'),
-}
-
-BONUS_BAR_COLOR = {
-    'first':  '#6366f1',
-    'last':   '#06b6d4',
-    'middle': '#334155',
-    'solo':   '#f59e0b',
-}
-
-
 def tech_score_color(score: float) -> str:
     if score >= 0.8:
-        return '#22c55e'   # 緑
+        return '#22c55e'
     elif score >= 0.5:
-        return '#f59e0b'   # 黄
+        return '#f59e0b'
     else:
-        return '#ef4444'   # 赤
+        return '#ef4444'
 
 
 def make_card(row: dict, jpeg_url: str) -> str:
     pos = row['position']
-    badge_color, badge_label = POSITION_STYLE.get(pos, ('#475569', pos.upper()))
-    bar_color = BONUS_BAR_COLOR.get(pos, '#475569')
-    bonus = row['bonus_weight']
-    bonus_pct = min((bonus - 1.0) / 0.5 * 100, 100)  # 1.0〜1.5 → 0〜100%
-
     stem = html.escape(row['stem'])
     dt = row['datetime'][11:19] if len(row['datetime']) >= 19 else ''
     n_persons = row['person_count']
@@ -110,18 +90,17 @@ def make_card(row: dict, jpeg_url: str) -> str:
     tech_color = tech_score_color(tech)
     gid = row['group_id']
 
-    return f'''
-<div class="card pos-{pos}" data-stem="{stem}" data-gid="{gid}" data-url="{jpeg_url}"
-  data-sharpness="{sharp:.3f}"
-  data-exposure="{expo:.3f}"
-  data-persons="{n_persons}"
-  data-position="{pos}"
-  onclick="openModal('{jpeg_url}','{stem}',{gid})">
+    return f'''<div class="card" tabindex="0" data-stem="{stem}" data-gid="{gid}" data-url="{jpeg_url}"
+  data-sharpness="{sharp:.3f}" data-exposure="{expo:.3f}"
+  data-persons="{n_persons}" data-position="{pos}"
+  onclick="openModal('{jpeg_url}','{stem}',{gid})"
+  onkeydown="cardKeydown(event,this)">
   <div class="thumb-wrap">
     <img src="{jpeg_url}" alt="{stem}" loading="lazy">
-    <span class="pos-badge" style="background:{badge_color}">{badge_label}</span>
     <div class="select-overlay" id="sol-{stem}"></div>
     <button class="select-badge" id="sbadge-{stem}" onclick="toggleSelect(event,'{stem}')" title="セレクト切り替え"></button>
+    <button class="exclude-btn" id="excbtn-{stem}" onclick="toggleExclude(event,'{stem}')" title="除外">🚫</button>
+    <div class="exclude-label" id="exclabel-{stem}" style="display:none">除外済み</div>
   </div>
   <div class="card-info">
     <div class="card-name">{stem}</div>
@@ -132,13 +111,6 @@ def make_card(row: dict, jpeg_url: str) -> str:
     <div class="tech-row">
       <span class="tech-main" style="color:{tech_color}">技術 {tech:.2f}</span>
       <span class="tech-sub">鮮 {sharp:.2f} / 露 {expo:.2f}</span>
-    </div>
-    <div class="bonus-row">
-      <span class="bonus-label">bonus</span>
-      <div class="bonus-bg">
-        <div class="bonus-bar" style="width:{bonus_pct:.0f}%;background:{bar_color}"></div>
-      </div>
-      <span class="bonus-val">×{bonus:.1f}</span>
     </div>
   </div>
 </div>'''
@@ -192,7 +164,6 @@ def make_session_panel(session_info: dict) -> str:
 
 
 def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = None) -> str:
-    # グループ単位に整理
     sorted_rows = sorted(rows, key=lambda r: (r['group_id'], r['datetime'], r['stem']))
     groups_html_parts = []
     for gid, it in groupby(sorted_rows, key=lambda r: r['group_id']):
@@ -203,10 +174,6 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
 
     n_groups = max(r['group_id'] for r in rows) + 1
     n_shots  = len(rows)
-    n_solo   = sum(1 for r in rows if r['position'] == 'solo')
-    n_first  = sum(1 for r in rows if r['position'] == 'first')
-    n_last   = sum(1 for r in rows if r['position'] == 'last')
-    n_middle = sum(1 for r in rows if r['position'] == 'middle')
 
     tech_scores = [r['technical_score'] for r in rows]
     tech_avg  = sum(tech_scores) / len(tech_scores) if tech_scores else 0.0
@@ -215,10 +182,8 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     tech_avg_color = tech_score_color(tech_avg)
 
     session_panel_html = make_session_panel(session_info) if session_info else ''
-    # JS用: session_noteの初期値（JSON文字列としてエスケープ）
     session_note_init = json.dumps(session_info.get('session_note', '') if session_info else '')
 
-    # JS用: 全ショットリスト（グループ順）
     all_shots_json = json.dumps(
         [{'url': find_jpeg(jpeg_dir, r['stem']), 'stem': r['stem'], 'gid': r['group_id']}
          for r in sorted_rows],
@@ -238,47 +203,63 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: #0a0f1e;
     color: #e2e8f0;
-    min-height: 100vh;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }}
 
   /* ヘッダー */
   .header {{
     background: #0f1829;
     border-bottom: 1px solid #1e2d45;
-    padding: 18px 24px;
-    position: sticky;
-    top: 0;
+    padding: 12px 16px;
+    flex-shrink: 0;
     z-index: 100;
   }}
-  .header h1 {{ font-size: 1.1rem; color: #f1f5f9; margin-bottom: 14px; }}
+  .header-top {{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }}
+  .hamburger {{
+    background: none;
+    border: 1px solid #1e2d45;
+    color: #94a3b8;
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 4px 9px;
+    border-radius: 6px;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: all 0.15s;
+  }}
+  .hamburger:hover {{ border-color: #818cf8; color: #818cf8; }}
+  .header h1 {{ font-size: 1.05rem; color: #f1f5f9; flex: 1; }}
   .header h1 span {{ color: #818cf8; }}
 
   .stats {{
     display: flex;
-    gap: 10px;
+    gap: 8px;
     flex-wrap: wrap;
-    margin-bottom: 14px;
+    margin-bottom: 10px;
   }}
   .stat {{
     background: #0a0f1e;
     border: 1px solid #1e2d45;
     border-radius: 8px;
-    padding: 6px 14px;
+    padding: 5px 12px;
     text-align: center;
-    min-width: 80px;
+    min-width: 68px;
   }}
-  .stat .n {{ font-size: 1.3rem; font-weight: 700; }}
-  .stat .l {{ font-size: 0.68rem; color: #64748b; margin-top: 2px; }}
-  .s-group  .n {{ color: #818cf8; }}
-  .s-solo   .n {{ color: #f59e0b; }}
-  .s-first  .n {{ color: #6366f1; }}
-  .s-last   .n {{ color: #06b6d4; }}
-  .s-middle .n {{ color: #475569; }}
-  .s-tech   .n {{ color: #22c55e; }}
-  .s-top10  .n {{ color: #22c55e; }}
+  .stat .n {{ font-size: 1.2rem; font-weight: 700; }}
+  .stat .l {{ font-size: 0.65rem; color: #64748b; margin-top: 2px; }}
+  .s-group .n {{ color: #818cf8; }}
+  .s-tech  .n {{ color: #22c55e; }}
+  .s-top10 .n {{ color: #22c55e; }}
 
-  /* フィルター */
-  .filters {{
+  .header-filters {{
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
@@ -296,11 +277,8 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   }}
   .filter-btn:hover  {{ border-color: #818cf8; color: #818cf8; }}
   .filter-btn.active {{ background: #818cf8; border-color: #818cf8; color: #fff; }}
-  .filter-btn.f-solo.active   {{ background: #f59e0b; border-color: #f59e0b; }}
-  .filter-btn.f-first.active  {{ background: #6366f1; border-color: #6366f1; }}
-  .filter-btn.f-last.active   {{ background: #06b6d4; border-color: #06b6d4; }}
-  .filter-btn.f-multi.active  {{ background: #22c55e; border-color: #22c55e; }}
-
+  .filter-btn.f-multi.active {{ background: #22c55e; border-color: #22c55e; }}
+  .filter-btn.f-solo.active  {{ background: #f59e0b; border-color: #f59e0b; }}
   .jump-input {{
     padding: 4px 10px;
     border-radius: 16px;
@@ -312,18 +290,46 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   }}
   .jump-input::placeholder {{ color: #475569; }}
 
-  /* コンテンツ */
-  .content {{ padding: 20px 24px; }}
-  .counter {{ color: #475569; font-size: 0.78rem; margin-bottom: 16px; }}
+  /* 2段組レイアウト */
+  .app-layout {{
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }}
+
+  /* サイドパネル */
+  .sidebar {{
+    width: 280px;
+    flex-shrink: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #080d1a;
+    border-right: 1px solid #1e2d45;
+    padding: 14px;
+    transition: width 0.2s ease, padding 0.2s ease;
+  }}
+  .sidebar.collapsed {{
+    width: 0;
+    padding: 0;
+    border-right: none;
+  }}
+
+  /* メインパネル */
+  .main-panel {{
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+  }}
+
+  .counter {{ color: #475569; font-size: 0.78rem; margin-bottom: 14px; }}
 
   /* グループセクション */
   .group {{
-    margin-bottom: 28px;
+    margin-bottom: 24px;
     border: 1px solid #1e2d45;
     border-radius: 12px;
     overflow: hidden;
   }}
-
   .group-header {{
     display: flex;
     align-items: center;
@@ -333,18 +339,17 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     border-bottom: 1px solid #1e2d45;
     font-size: 0.8rem;
   }}
-  .gid    {{ font-weight: 700; color: #818cf8; min-width: 70px; }}
-  .gsize  {{ color: #94a3b8; }}
-  .gtime  {{ color: #64748b; }}
-  .gtech  {{ font-size: 0.75rem; font-weight: 600; }}
+  .gid     {{ font-weight: 700; color: #818cf8; min-width: 70px; }}
+  .gsize   {{ color: #94a3b8; }}
+  .gtime   {{ color: #64748b; }}
+  .gtech   {{ font-size: 0.75rem; font-weight: 600; }}
   .gpersons {{ color: #64748b; margin-left: auto; }}
 
   .group-cards {{
     display: flex;
     flex-wrap: wrap;
-    gap: 0;
-    padding: 12px;
-    gap: 10px;
+    padding: 10px;
+    gap: 8px;
   }}
 
   /* カード */
@@ -355,13 +360,23 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     border-radius: 8px;
     overflow: hidden;
     cursor: zoom-in;
-    transition: transform 0.15s, border-color 0.15s;
+    transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
     flex-shrink: 0;
+    outline: none;
   }}
   .card:hover {{ transform: translateY(-2px); border-color: #818cf8; }}
-  .card.pos-first  {{ border-color: #4338ca; }}
-  .card.pos-last   {{ border-color: #0891b2; }}
-  .card.pos-solo   {{ border-color: #d97706; }}
+  .card:focus-visible {{
+    border-color: #818cf8;
+    box-shadow: 0 0 0 2px #818cf8;
+  }}
+  .card.last-viewed {{
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px #6366f1;
+  }}
+  .card.excluded {{
+    opacity: 0.38;
+    filter: grayscale(0.7);
+  }}
 
   .thumb-wrap {{
     position: relative;
@@ -378,48 +393,30 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   }}
   .card:hover .thumb-wrap img {{ transform: scale(1.04); }}
 
-  .card-info {{ padding: 8px 10px; }}
+  .card-info {{ padding: 7px 9px; }}
   .card-name {{
-    font-size: 0.68rem;
+    font-size: 0.65rem;
     color: #64748b;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    margin-bottom: 4px;
+    margin-bottom: 3px;
   }}
   .card-meta {{
     display: flex;
     justify-content: space-between;
-    font-size: 0.68rem;
+    font-size: 0.65rem;
     color: #475569;
-    margin-bottom: 6px;
+    margin-bottom: 5px;
   }}
   .card-person {{ color: #94a3b8; }}
-
-  .bonus-row {{
-    display: grid;
-    grid-template-columns: 36px 1fr 28px;
-    align-items: center;
-    gap: 5px;
-  }}
   .tech-row {{
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    margin-bottom: 5px;
   }}
   .tech-main {{ font-size: 0.78rem; font-weight: 700; }}
   .tech-sub  {{ font-size: 0.6rem; color: #475569; }}
-
-  .bonus-label {{ font-size: 0.62rem; color: #475569; }}
-  .bonus-bg {{
-    background: #0a0f1e;
-    border-radius: 3px;
-    height: 4px;
-    overflow: hidden;
-  }}
-  .bonus-bar {{ height: 100%; border-radius: 3px; }}
-  .bonus-val {{ font-size: 0.62rem; color: #94a3b8; text-align: right; }}
 
   /* セレクトオーバーレイ・バッジ */
   .select-overlay {{
@@ -458,39 +455,40 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   .select-badge.sel-hold   {{ background: #f59e0b; }}
   .select-badge.sel-reject {{ background: #ef4444; }}
 
-  /* pos-badge を左上に移動（select-badge と重ならないよう） */
-  .pos-badge {{
+  /* 除外ボタン・ラベル */
+  .exclude-btn {{
     position: absolute;
-    top: 6px;
-    left: 6px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.62rem;
-    font-weight: 800;
-    color: #fff;
-    letter-spacing: 0.05em;
-  }}
-
-  /* サマリーバー */
-  .select-summary {{
+    bottom: 6px;
+    right: 6px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0,0,0,0.55);
+    font-size: 0.72rem;
+    cursor: pointer;
+    z-index: 10;
     display: flex;
     align-items: center;
-    gap: 6px;
-    background: #0f1829;
-    border: 1px solid #1e2d45;
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-size: 0.82rem;
-    color: #64748b;
-    margin-bottom: 16px;
-    flex-wrap: wrap;
+    justify-content: center;
+    padding: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+    line-height: 1;
   }}
-  .sel-sum-label {{ color: #475569; margin-right: 4px; }}
-  .sel-sum-pick   {{ color: #22c55e; font-weight: 700; }}
-  .sel-sum-hold   {{ color: #f59e0b; font-weight: 700; }}
-  .sel-sum-reject {{ color: #ef4444; font-weight: 700; }}
-  .sel-sum-none   {{ color: #475569; }}
-  .sel-sum-sep    {{ color: #1e2d45; }}
+  .card:hover .exclude-btn,
+  .card.excluded .exclude-btn {{ opacity: 1; }}
+  .exclude-label {{
+    position: absolute;
+    bottom: 6px;
+    left: 6px;
+    background: rgba(0,0,0,0.72);
+    color: #94a3b8;
+    font-size: 0.6rem;
+    padding: 1px 5px;
+    border-radius: 3px;
+    pointer-events: none;
+  }}
 
   /* モーダル */
   .modal {{
@@ -534,49 +532,52 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
 
   .hidden {{ display: none !important; }}
 
+  /* ---- サイドバー内コンテンツ ---- */
+
   /* セッション情報パネル */
   .session-panel {{
     background: #0f1829;
     border: 1px solid #1e2d45;
     border-radius: 10px;
-    padding: 14px 18px;
-    margin-bottom: 18px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
   }}
   .session-header {{
     display: flex;
     align-items: baseline;
-    gap: 14px;
-    margin-bottom: 6px;
+    gap: 10px;
+    margin-bottom: 5px;
+    flex-wrap: wrap;
   }}
   .session-title {{
-    font-size: 1rem;
+    font-size: 0.9rem;
     font-weight: 700;
     color: #f1f5f9;
   }}
   .session-date {{
-    font-size: 0.78rem;
+    font-size: 0.72rem;
     color: #64748b;
   }}
   .session-purpose {{
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     color: #94a3b8;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
   }}
   .session-memo-label {{
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     color: #64748b;
-    margin-bottom: 5px;
+    margin-bottom: 4px;
   }}
   .session-note {{
     width: 100%;
-    min-height: 72px;
+    min-height: 64px;
     background: #0a0f1e;
     border: 1px solid #1e2d45;
     border-radius: 6px;
     color: #e2e8f0;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     font-family: inherit;
-    padding: 8px 10px;
+    padding: 6px 8px;
     resize: vertical;
     outline: none;
     transition: border-color 0.15s;
@@ -584,29 +585,58 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   .session-note:focus {{ border-color: #818cf8; }}
   .session-note::placeholder {{ color: #334155; }}
 
+  /* セレクトサマリー */
+  .select-summary {{
+    background: #0f1829;
+    border: 1px solid #1e2d45;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+  }}
+  .sel-sum-label {{
+    font-size: 0.7rem;
+    color: #475569;
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #818cf8;
+  }}
+  .sel-sum-row {{
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }}
+  .sel-sum-item {{ display: flex; align-items: baseline; gap: 4px; }}
+  .sel-sum-pick   {{ color: #22c55e; font-weight: 700; font-size: 1.1rem; }}
+  .sel-sum-hold   {{ color: #f59e0b; font-weight: 700; font-size: 1.1rem; }}
+  .sel-sum-reject {{ color: #ef4444; font-weight: 700; font-size: 1.1rem; }}
+  .sel-sum-none   {{ color: #475569; font-weight: 700; font-size: 1.1rem; }}
+  .sel-sum-sublabel {{ font-size: 0.68rem; color: #64748b; }}
+
   /* スコアチューナーパネル */
   .tuner-panel {{
     background: #0f1829;
     border: 1px solid #1e2d45;
     border-radius: 10px;
-    padding: 14px 18px;
-    margin-bottom: 18px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
   }}
   .tuner-title {{
-    font-size: 0.78rem;
+    font-size: 0.75rem;
     font-weight: 700;
     color: #818cf8;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
     letter-spacing: 0.04em;
   }}
   .tuner-rows {{
     display: grid;
-    grid-template-columns: 100px 1fr 44px;
+    grid-template-columns: 90px 1fr 40px;
     align-items: center;
-    gap: 8px 10px;
+    gap: 7px 8px;
   }}
   .tuner-label {{
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     color: #94a3b8;
     text-align: right;
     white-space: nowrap;
@@ -624,8 +654,8 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   .tuner-slider::-webkit-slider-thumb {{
     -webkit-appearance: none;
     appearance: none;
-    width: 14px;
-    height: 14px;
+    width: 13px;
+    height: 13px;
     border-radius: 50%;
     background: #818cf8;
     cursor: pointer;
@@ -633,7 +663,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   }}
   .tuner-slider::-webkit-slider-thumb:hover {{ background: #a5b4fc; }}
   .tuner-val {{
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     color: #f1f5f9;
     font-weight: 600;
     text-align: right;
@@ -641,25 +671,65 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   }}
   .tuner-reset {{
     grid-column: 3;
-    margin-top: 6px;
-    padding: 4px 10px;
-    border-radius: 12px;
+    margin-top: 4px;
+    padding: 3px 8px;
+    border-radius: 10px;
     border: 1px solid #1e2d45;
     background: transparent;
     color: #64748b;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     cursor: pointer;
     transition: all 0.15s;
     white-space: nowrap;
   }}
   .tuner-reset:hover {{ border-color: #818cf8; color: #818cf8; }}
+
+  /* フィルタパネル */
+  .filter-panel {{
+    background: #0f1829;
+    border: 1px solid #1e2d45;
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+  }}
+  .filter-panel-title {{
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: #818cf8;
+    margin-bottom: 10px;
+    letter-spacing: 0.04em;
+  }}
+  .filter-check-row {{
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 8px;
+    font-size: 0.75rem;
+    color: #94a3b8;
+    cursor: pointer;
+    user-select: none;
+  }}
+  .filter-check-row:last-child {{ margin-bottom: 0; }}
+  .filter-check-row input[type="checkbox"] {{
+    accent-color: #818cf8;
+    width: 13px;
+    height: 13px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }}
+
+  @media (max-width: 899px) {{
+    .sidebar {{ width: 260px; }}
+  }}
 </style>
 </head>
 <body>
 
 <div class="header">
-  <h1>Aesthetic Shadowing Agent — <span>Stage 2 グループレポート</span></h1>
-
+  <div class="header-top">
+    <button class="hamburger" onclick="toggleSidebar()" title="サイドパネル切り替え">☰</button>
+    <h1>Aesthetic Shadowing Agent — <span>Stage 2 グループレポート</span></h1>
+  </div>
   <div class="stats">
     <div class="stat s-group">
       <div class="n">{n_groups}</div><div class="l">グループ</div>
@@ -667,27 +737,14 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     <div class="stat">
       <div class="n">{n_shots}</div><div class="l">総ショット</div>
     </div>
-    <div class="stat s-solo">
-      <div class="n">{n_solo}</div><div class="l">SOLO</div>
-    </div>
-    <div class="stat s-first">
-      <div class="n">{n_first}</div><div class="l">FIRST</div>
-    </div>
-    <div class="stat s-last">
-      <div class="n">{n_last}</div><div class="l">LAST</div>
-    </div>
-    <div class="stat s-middle">
-      <div class="n">{n_middle}</div><div class="l">MIDDLE</div>
-    </div>
     <div class="stat s-tech">
       <div class="n" style="color:{tech_avg_color}">{tech_avg:.2f}</div><div class="l">技術平均</div>
     </div>
     <div class="stat s-top10">
-      <div class="n" style="color:#22c55e">{n_top10}</div><div class="l">上位10%</div>
+      <div class="n">{n_top10}</div><div class="l">上位10%</div>
     </div>
   </div>
-
-  <div class="filters">
+  <div class="header-filters">
     <button class="filter-btn active" onclick="setFilter('all',this)">全グループ</button>
     <button class="filter-btn f-multi" onclick="setFilter('multi',this)">複数枚のみ</button>
     <button class="filter-btn f-solo"  onclick="setFilter('solo',this)">SOLO のみ</button>
@@ -697,45 +754,78 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   </div>
 </div>
 
-<div class="content">
+<div class="app-layout">
+  <aside class="sidebar" id="sidebar">
 {session_panel_html}
-  <div class="tuner-panel">
-    <div class="tuner-title">スコアチューナー</div>
-    <div class="tuner-rows">
-      <span class="tuner-label">フォーカス重み</span>
-      <input class="tuner-slider" id="w-sharpness" type="range" min="0" max="1" step="0.05" value="0.50" oninput="onSlider('w-sharpness','v-sharpness')">
-      <span class="tuner-val" id="v-sharpness">0.50</span>
-
-      <span class="tuner-label">露出重み</span>
-      <input class="tuner-slider" id="w-exposure" type="range" min="0" max="1" step="0.05" value="0.40" oninput="onSlider('w-exposure','v-exposure')">
-      <span class="tuner-val" id="v-exposure">0.40</span>
-
-      <span class="tuner-label">人物ボーナス</span>
-      <input class="tuner-slider" id="w-persons" type="range" min="0" max="1" step="0.05" value="0.20" oninput="onSlider('w-persons','v-persons')">
-      <span class="tuner-val" id="v-persons">0.20</span>
-
-      <span class="tuner-label">初期衝動</span>
-      <input class="tuner-slider" id="w-first" type="range" min="0" max="1" step="0.05" value="0.20" oninput="onSlider('w-first','v-first')">
-      <span class="tuner-val" id="v-first">0.20</span>
-
-      <span></span>
-      <span></span>
-      <button class="tuner-reset" onclick="resetTuner()">デフォルトに戻す</button>
+    <div class="select-summary" id="select-summary">
+      <span class="sel-sum-label">セレクト</span>
+      <div class="sel-sum-row">
+        <div class="sel-sum-item">
+          <span class="sel-sum-pick" id="cnt-pick">0</span>
+          <span class="sel-sum-sublabel">採用</span>
+        </div>
+        <div class="sel-sum-item">
+          <span class="sel-sum-hold" id="cnt-hold">0</span>
+          <span class="sel-sum-sublabel">保留</span>
+        </div>
+        <div class="sel-sum-item">
+          <span class="sel-sum-reject" id="cnt-reject">0</span>
+          <span class="sel-sum-sublabel">不採用</span>
+        </div>
+        <div class="sel-sum-item">
+          <span class="sel-sum-none" id="cnt-none">{n_shots}</span>
+          <span class="sel-sum-sublabel">未選択</span>
+        </div>
+      </div>
     </div>
-  </div>
-  <div class="select-summary" id="select-summary">
-    <span class="sel-sum-label">セレクト:</span>
-    採用 <span class="sel-sum-pick" id="cnt-pick">0</span>
-    <span class="sel-sum-sep">/</span>
-    保留 <span class="sel-sum-hold" id="cnt-hold">0</span>
-    <span class="sel-sum-sep">/</span>
-    不採用 <span class="sel-sum-reject" id="cnt-reject">0</span>
-    <span class="sel-sum-sep">/</span>
-    未選択 <span class="sel-sum-none" id="cnt-none">{n_shots}</span>
-  </div>
-  <div class="counter" id="counter">表示: {n_groups} グループ</div>
-  <div id="groups">
+
+    <div class="tuner-panel">
+      <div class="tuner-title">スコアチューナー</div>
+      <div class="tuner-rows">
+        <span class="tuner-label">フォーカス重み</span>
+        <input class="tuner-slider" id="w-sharpness" type="range" min="0" max="1" step="0.05" value="0.50" oninput="onSlider('w-sharpness','v-sharpness')">
+        <span class="tuner-val" id="v-sharpness">0.50</span>
+
+        <span class="tuner-label">露出重み</span>
+        <input class="tuner-slider" id="w-exposure" type="range" min="0" max="1" step="0.05" value="0.40" oninput="onSlider('w-exposure','v-exposure')">
+        <span class="tuner-val" id="v-exposure">0.40</span>
+
+        <span class="tuner-label">人物ボーナス</span>
+        <input class="tuner-slider" id="w-persons" type="range" min="0" max="1" step="0.05" value="0.20" oninput="onSlider('w-persons','v-persons')">
+        <span class="tuner-val" id="v-persons">0.20</span>
+
+        <span class="tuner-label">初期衝動</span>
+        <input class="tuner-slider" id="w-first" type="range" min="0" max="1" step="0.05" value="0.20" oninput="onSlider('w-first','v-first')">
+        <span class="tuner-val" id="v-first">0.20</span>
+
+        <span></span>
+        <span></span>
+        <button class="tuner-reset" onclick="resetTuner()">デフォルトに戻す</button>
+      </div>
+    </div>
+
+    <div class="filter-panel">
+      <div class="filter-panel-title">フィルタ</div>
+      <label class="filter-check-row">
+        <input type="checkbox" id="f-hide-excluded" onchange="onFilterChange()">
+        除外済みを非表示
+      </label>
+      <label class="filter-check-row">
+        <input type="checkbox" id="f-top10" onchange="onFilterChange()">
+        上位10%のみ表示
+      </label>
+      <label class="filter-check-row">
+        <input type="checkbox" id="f-no-persons" onchange="onFilterChange()">
+        人物なしを非表示
+      </label>
+    </div>
+  </aside>
+
+  <div class="main-panel">
+    <div class="counter" id="counter">表示: {n_groups} グループ</div>
+    <div id="groups">
 {groups_html}
+    </div>
   </div>
 </div>
 
@@ -745,26 +835,44 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   <img id="modal-img" src="" alt="">
   <div class="modal-footer">
     <span class="modal-name" id="modal-name"></span>
-    <span class="modal-hint">← → 同グループ内 &nbsp;|&nbsp; J/K 全体移動 &nbsp;|&nbsp; 1=✗ &nbsp;3=△ &nbsp;5=✓</span>
+    <span class="modal-hint">← → 同グループ内 &nbsp;|&nbsp; J/K 全体移動 &nbsp;|&nbsp; 1=✗ &nbsp;3=△ &nbsp;5=✓ &nbsp;|&nbsp; x=除外 &nbsp;u=解除</span>
   </div>
 </div>
 
 <script>
-// ---- フィルター ----
+const _FILENAME = window.location.pathname.split('/').pop() || 'report.html';
+
+// ---- サイドパネル ----
+const SIDEBAR_KEY = 'asa-sidebar-' + _FILENAME;
+
+function toggleSidebar() {{
+  const sidebar = document.getElementById('sidebar');
+  const isCollapsed = sidebar.classList.toggle('collapsed');
+  try {{ localStorage.setItem(SIDEBAR_KEY, isCollapsed ? 'closed' : 'open'); }} catch(e) {{}}
+}}
+
+(function initSidebar() {{
+  const saved = localStorage.getItem(SIDEBAR_KEY);
+  const sidebar = document.getElementById('sidebar');
+  if (saved !== null) {{
+    sidebar.classList.toggle('collapsed', saved === 'closed');
+  }} else if (window.innerWidth < 900) {{
+    sidebar.classList.add('collapsed');
+  }}
+}})();
+
+// ---- グループフィルター ----
 function setFilter(type, btn) {{
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  let visible = 0;
   document.querySelectorAll('.group').forEach(g => {{
     const size = parseInt(g.querySelector('.gsize').textContent);
-    let show = false;
-    if (type === 'all')   show = true;
-    if (type === 'multi') show = size > 1;
-    if (type === 'solo')  show = size === 1;
+    const show = (type === 'all') || (type === 'multi' && size > 1) || (type === 'solo' && size === 1);
     g.classList.toggle('hidden', !show);
-    if (show) visible++;
   }});
+  const visible = document.querySelectorAll('.group:not(.hidden)').length;
   document.getElementById('counter').textContent = '表示: ' + visible + ' グループ';
+  applyAllFilters();
 }}
 
 function jumpTo(val) {{
@@ -777,22 +885,37 @@ function jumpTo(val) {{
 // ---- モーダル ----
 const ALL_SHOTS = {all_shots_json};
 let currentShotIdx = -1;
+let lastViewedStem = null;
 
 function openModal(url, name, gid) {{
+  document.querySelectorAll('.card.last-viewed').forEach(c => c.classList.remove('last-viewed'));
+  lastViewedStem = name;
   currentShotIdx = ALL_SHOTS.findIndex(s => s.stem === name);
   document.getElementById('modal-img').src = url;
   document.getElementById('modal-name').textContent = name;
   document.getElementById('modal').classList.add('open');
 }}
 
+function closeModalAction() {{
+  document.getElementById('modal').classList.remove('open');
+  document.getElementById('modal-img').src = '';
+  if (lastViewedStem) {{
+    const card = document.querySelector('.card[data-stem="' + lastViewedStem + '"]');
+    if (card) {{
+      card.classList.add('last-viewed');
+      card.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+    }}
+  }}
+}}
+
 function closeModal(e) {{
   if (!e || e.target === document.getElementById('modal')) {{
-    document.getElementById('modal').classList.remove('open');
-    document.getElementById('modal-img').src = '';
+    closeModalAction();
   }}
 }}
 
 function navigateModal(shot) {{
+  lastViewedStem = shot.stem;
   currentShotIdx = ALL_SHOTS.findIndex(s => s.stem === shot.stem);
   document.getElementById('modal-img').src = shot.url;
   document.getElementById('modal-name').textContent = shot.stem;
@@ -801,10 +924,9 @@ function navigateModal(shot) {{
 document.addEventListener('keydown', function(e) {{
   const modal = document.getElementById('modal');
   const isOpen = modal.classList.contains('open');
-
   if (!isOpen) return;
 
-  if (e.key === 'Escape') {{ closeModal(); return; }}
+  if (e.key === 'Escape') {{ closeModalAction(); return; }}
 
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {{
     e.preventDefault();
@@ -813,10 +935,8 @@ document.addEventListener('keydown', function(e) {{
     const groupShots = ALL_SHOTS.filter(s => s.gid === curGid);
     const groupIdx = groupShots.findIndex(s => s.stem === ALL_SHOTS[currentShotIdx].stem);
     const delta = e.key === 'ArrowRight' ? 1 : -1;
-    const nextGroupIdx = groupIdx + delta;
-    if (nextGroupIdx >= 0 && nextGroupIdx < groupShots.length) {{
-      navigateModal(groupShots[nextGroupIdx]);
-    }}
+    const next = groupIdx + delta;
+    if (next >= 0 && next < groupShots.length) navigateModal(groupShots[next]);
     return;
   }}
 
@@ -834,11 +954,34 @@ document.addEventListener('keydown', function(e) {{
   if (e.key === '1') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'reject'); return; }}
   if (e.key === '3') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'hold');   return; }}
   if (e.key === '5') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'pick');   return; }}
+  if (e.key === 'x' || e.key === 'X') {{
+    if (currentShotIdx >= 0) setExcluded(ALL_SHOTS[currentShotIdx].stem);
+    return;
+  }}
+  if (e.key === 'u' || e.key === 'U') {{
+    if (currentShotIdx >= 0) unsetExcluded(ALL_SHOTS[currentShotIdx].stem);
+    return;
+  }}
 }});
 
+// ---- グリッドキーボード操作 ----
+function cardKeydown(e, card) {{
+  if (document.getElementById('modal').classList.contains('open')) return;
+  const stem = card.dataset.stem;
+  if (e.key === 'Enter' || e.key === ' ') {{
+    e.preventDefault();
+    openModal(card.dataset.url, stem, parseInt(card.dataset.gid));
+    return;
+  }}
+  if (e.key === '1') {{ e.preventDefault(); setSelect(stem, 'reject'); return; }}
+  if (e.key === '3') {{ e.preventDefault(); setSelect(stem, 'hold');   return; }}
+  if (e.key === '5') {{ e.preventDefault(); setSelect(stem, 'pick');   return; }}
+  if (e.key === 'x' || e.key === 'X') {{ e.preventDefault(); setExcluded(stem); return; }}
+  if (e.key === 'u' || e.key === 'U') {{ e.preventDefault(); unsetExcluded(stem); return; }}
+}}
+
 // ---- セレクト管理 ----
-const SELECT_FILENAME = window.location.pathname.split('/').pop() || 'report.html';
-const SELECT_KEY = 'asa-select-' + SELECT_FILENAME;
+const SELECT_KEY = 'asa-select-' + _FILENAME;
 let selectState = {{}};
 
 function loadSelectState() {{
@@ -849,11 +992,11 @@ function loadSelectState() {{
 }}
 
 function saveSelectState() {{
-  localStorage.setItem(SELECT_KEY, JSON.stringify(selectState));
+  try {{ localStorage.setItem(SELECT_KEY, JSON.stringify(selectState)); }} catch(e) {{}}
 }}
 
 function toggleSelect(e, stem) {{
-  e.stopPropagation();
+  if (e) e.stopPropagation();
   const cycle = {{ 'pick': 'hold', 'hold': 'reject', 'reject': null }};
   const current = selectState[stem];
   const next = (current in cycle) ? cycle[current] : 'pick';
@@ -875,12 +1018,10 @@ function updateCardVisual(stem) {{
   const overlay = document.getElementById('sol-' + stem);
   const badge   = document.getElementById('sbadge-' + stem);
   if (!overlay || !badge) return;
-
   const state = selectState[stem];
   overlay.className = 'select-overlay';
   badge.className   = 'select-badge';
   badge.textContent = '';
-
   if (state === 'pick')   {{ overlay.classList.add('sel-pick');   badge.classList.add('sel-pick');   badge.textContent = '✓'; }}
   if (state === 'hold')   {{ overlay.classList.add('sel-hold');   badge.classList.add('sel-hold');   badge.textContent = '△'; }}
   if (state === 'reject') {{ overlay.classList.add('sel-reject'); badge.classList.add('sel-reject'); badge.textContent = '✗'; }}
@@ -890,29 +1031,111 @@ function updateSummary() {{
   const total = ALL_SHOTS.length;
   let pick = 0, hold = 0, reject = 0;
   for (const v of Object.values(selectState)) {{
-    if (v === 'pick')   pick++;
+    if (v === 'pick')        pick++;
     else if (v === 'hold')   hold++;
     else if (v === 'reject') reject++;
   }}
-  const none = total - pick - hold - reject;
   document.getElementById('cnt-pick').textContent   = pick;
   document.getElementById('cnt-hold').textContent   = hold;
   document.getElementById('cnt-reject').textContent = reject;
-  document.getElementById('cnt-none').textContent   = none;
+  document.getElementById('cnt-none').textContent   = total - pick - hold - reject;
 }}
 
-// 初期化
-loadSelectState();
-ALL_SHOTS.forEach(s => updateCardVisual(s.stem));
-updateSummary();
+// ---- 除外フラグ ----
+const EXCLUDE_KEY = 'asa-exclude-' + _FILENAME;
+let excludeState = {{}};
 
-// ---- セッションメモ localStorage 自動保存 ----
+function loadExcludeState() {{
+  try {{
+    const saved = localStorage.getItem(EXCLUDE_KEY);
+    excludeState = saved ? JSON.parse(saved) : {{}};
+  }} catch(e) {{ excludeState = {{}}; }}
+}}
 
-// スコアチューナー
+function saveExcludeState() {{
+  try {{ localStorage.setItem(EXCLUDE_KEY, JSON.stringify(excludeState)); }} catch(e) {{}}
+}}
+
+function setExcluded(stem) {{
+  excludeState[stem] = true;
+  saveExcludeState();
+  updateCardExcludeVisual(stem);
+  applyAllFilters();
+}}
+
+function unsetExcluded(stem) {{
+  delete excludeState[stem];
+  saveExcludeState();
+  updateCardExcludeVisual(stem);
+  applyAllFilters();
+}}
+
+function toggleExclude(e, stem) {{
+  if (e) e.stopPropagation();
+  if (excludeState[stem]) {{ unsetExcluded(stem); }} else {{ setExcluded(stem); }}
+}}
+
+function updateCardExcludeVisual(stem) {{
+  const card = document.querySelector('.card[data-stem="' + stem + '"]');
+  if (!card) return;
+  const isExcluded = !!excludeState[stem];
+  card.classList.toggle('excluded', isExcluded);
+  const label = document.getElementById('exclabel-' + stem);
+  if (label) label.style.display = isExcluded ? '' : 'none';
+}}
+
+// ---- フィルタ ----
+const FILTERS_KEY = 'asa-filters-' + _FILENAME;
+let filterState = {{ hideExcluded: false, top10Only: false, hideNoPersons: false }};
+
+function loadFilters() {{
+  try {{
+    const saved = localStorage.getItem(FILTERS_KEY);
+    if (saved) filterState = Object.assign(filterState, JSON.parse(saved));
+  }} catch(e) {{}}
+  document.getElementById('f-hide-excluded').checked = filterState.hideExcluded;
+  document.getElementById('f-top10').checked          = filterState.top10Only;
+  document.getElementById('f-no-persons').checked     = filterState.hideNoPersons;
+}}
+
+function saveFilters() {{
+  try {{ localStorage.setItem(FILTERS_KEY, JSON.stringify(filterState)); }} catch(e) {{}}
+}}
+
+function onFilterChange() {{
+  filterState.hideExcluded  = document.getElementById('f-hide-excluded').checked;
+  filterState.top10Only     = document.getElementById('f-top10').checked;
+  filterState.hideNoPersons = document.getElementById('f-no-persons').checked;
+  saveFilters();
+  applyAllFilters();
+}}
+
+function applyAllFilters() {{
+  const cards = Array.from(document.querySelectorAll('.card'));
+  let top10Threshold = -Infinity;
+  if (filterState.top10Only && cards.length > 0) {{
+    const scores = cards.map(c => parseFloat(c.dataset.computedScore || c.dataset.sharpness || '0'));
+    scores.sort((a, b) => b - a);
+    const idx = Math.max(0, Math.floor(scores.length * 0.1) - 1);
+    top10Threshold = scores[idx] !== undefined ? scores[idx] : 0;
+  }}
+  cards.forEach(card => {{
+    const stem = card.dataset.stem;
+    let visible = true;
+    if (filterState.hideExcluded && excludeState[stem]) visible = false;
+    if (filterState.hideNoPersons && parseInt(card.dataset.persons) === 0) visible = false;
+    if (filterState.top10Only) {{
+      const score = parseFloat(card.dataset.computedScore || card.dataset.sharpness || '0');
+      if (score < top10Threshold) visible = false;
+    }}
+    card.style.display = visible ? '' : 'none';
+  }});
+}}
+
+// ---- スコアチューナー ----
 (function() {{
   const DEFAULTS = {{ sharpness: 0.50, exposure: 0.40, persons: 0.20, first: 0.20 }};
-  const filename = window.location.pathname.split('/').pop() || 'index.html';
-  const STORAGE_KEY = 'asa-weights-' + filename;
+  const STORAGE_KEY = 'asa-weights-' + _FILENAME;
 
   function scoreColor(v) {{
     if (v >= 0.8) return '#22c55e';
@@ -942,12 +1165,14 @@ updateSummary();
                 + w.persons   * Math.min(p / 3, 1.0)
                 + w.first     * (isFirst ? 1.0 : 0.0);
       const normalized = total > 0 ? raw / total : 0;
+      card.dataset.computedScore = normalized.toFixed(4);
       const el = card.querySelector('.tech-main');
       if (el) {{
         el.textContent = '技術 ' + normalized.toFixed(2);
         el.style.color = scoreColor(normalized);
       }}
     }});
+    applyAllFilters();
   }}
 
   window.onSlider = function(sliderId, valId) {{
@@ -966,7 +1191,6 @@ updateSummary();
     try {{ localStorage.removeItem(STORAGE_KEY); }} catch(e) {{}}
   }};
 
-  // ページ読み込み時に復元
   try {{
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {{
@@ -984,17 +1208,14 @@ updateSummary();
   recompute();
 }})();
 
-// セッションメモ localStorage 自動保存
+// ---- セッションメモ localStorage 自動保存 ----
 (function() {{
   const textarea = document.getElementById('session-note');
   if (!textarea) return;
-  const filename = window.location.pathname.split('/').pop() || 'index.html';
-  const storageKey = 'asa-session-note-' + filename;
+  const storageKey = 'asa-session-note-' + _FILENAME;
   const initNote = {session_note_init};
-
   const saved = localStorage.getItem(storageKey);
   textarea.value = (saved !== null) ? saved : initNote;
-
   let timer;
   textarea.addEventListener('input', function() {{
     clearTimeout(timer);
@@ -1003,6 +1224,15 @@ updateSummary();
     }}, 500);
   }});
 }})();
+
+// ---- 初期化 ----
+loadSelectState();
+loadExcludeState();
+loadFilters();
+ALL_SHOTS.forEach(s => updateCardVisual(s.stem));
+ALL_SHOTS.forEach(s => updateCardExcludeVisual(s.stem));
+updateSummary();
+applyAllFilters();
 </script>
 </body>
 </html>'''
