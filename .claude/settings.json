@@ -2,6 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(plugins/aesthetic-shadowing/stage1/.venv/bin/python plugins/aesthetic-shadowing/stage*/*.py *)",
+      "Bash(plugins/aesthetic-shadowing/stage1/.venv/bin/pip install *)",
+      "Bash(plugins/aesthetic-shadowing/stage1/.venv/bin/pip install -r *)",
       "Bash(open *.html)",
       "Bash(mkdir -p *)",
       "Bash(git add plugins/aesthetic-shadowing/*)",
@@ -9,6 +11,12 @@
       "Bash(git log *)",
       "Bash(git status)",
       "Bash(git diff *)"
+    ],
+    "deny": [
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Bash(python -m pip install *)",
+      "Bash(python3 -m pip install *)"
     ]
   }
 }
