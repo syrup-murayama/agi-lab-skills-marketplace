@@ -101,7 +101,11 @@ def make_card(row: dict, jpeg_url: str) -> str:
 
     return f'''
 <div class="card pos-{pos}" data-stem="{stem}" data-gid="{gid}" data-url="{jpeg_url}"
-     onclick="openModal('{jpeg_url}','{stem}',{gid})">
+  data-sharpness="{sharp:.3f}"
+  data-exposure="{expo:.3f}"
+  data-persons="{n_persons}"
+  data-position="{pos}"
+  onclick="openModal('{jpeg_url}','{stem}',{gid})">
   <div class="thumb-wrap">
     <img src="{jpeg_url}" alt="{stem}" loading="lazy">
     <span class="pos-badge" style="background:{badge_color}">{badge_label}</span>
@@ -568,6 +572,76 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   }}
   .session-note:focus {{ border-color: #818cf8; }}
   .session-note::placeholder {{ color: #334155; }}
+
+  /* スコアチューナーパネル */
+  .tuner-panel {{
+    background: #0f1829;
+    border: 1px solid #1e2d45;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 18px;
+  }}
+  .tuner-title {{
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: #818cf8;
+    margin-bottom: 12px;
+    letter-spacing: 0.04em;
+  }}
+  .tuner-rows {{
+    display: grid;
+    grid-template-columns: 100px 1fr 44px;
+    align-items: center;
+    gap: 8px 10px;
+  }}
+  .tuner-label {{
+    font-size: 0.75rem;
+    color: #94a3b8;
+    text-align: right;
+    white-space: nowrap;
+  }}
+  .tuner-slider {{
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: #1e2d45;
+    outline: none;
+    cursor: pointer;
+  }}
+  .tuner-slider::-webkit-slider-thumb {{
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #818cf8;
+    cursor: pointer;
+    transition: background 0.15s;
+  }}
+  .tuner-slider::-webkit-slider-thumb:hover {{ background: #a5b4fc; }}
+  .tuner-val {{
+    font-size: 0.75rem;
+    color: #f1f5f9;
+    font-weight: 600;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }}
+  .tuner-reset {{
+    grid-column: 3;
+    margin-top: 6px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    border: 1px solid #1e2d45;
+    background: transparent;
+    color: #64748b;
+    font-size: 0.72rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }}
+  .tuner-reset:hover {{ border-color: #818cf8; color: #818cf8; }}
 </style>
 </head>
 <body>
@@ -614,6 +688,30 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
 
 <div class="content">
 {session_panel_html}
+  <div class="tuner-panel">
+    <div class="tuner-title">スコアチューナー</div>
+    <div class="tuner-rows">
+      <span class="tuner-label">フォーカス重み</span>
+      <input class="tuner-slider" id="w-sharpness" type="range" min="0" max="1" step="0.05" value="0.50" oninput="onSlider('w-sharpness','v-sharpness')">
+      <span class="tuner-val" id="v-sharpness">0.50</span>
+
+      <span class="tuner-label">露出重み</span>
+      <input class="tuner-slider" id="w-exposure" type="range" min="0" max="1" step="0.05" value="0.40" oninput="onSlider('w-exposure','v-exposure')">
+      <span class="tuner-val" id="v-exposure">0.40</span>
+
+      <span class="tuner-label">人物ボーナス</span>
+      <input class="tuner-slider" id="w-persons" type="range" min="0" max="1" step="0.05" value="0.20" oninput="onSlider('w-persons','v-persons')">
+      <span class="tuner-val" id="v-persons">0.20</span>
+
+      <span class="tuner-label">初期衝動</span>
+      <input class="tuner-slider" id="w-first" type="range" min="0" max="1" step="0.05" value="0.20" oninput="onSlider('w-first','v-first')">
+      <span class="tuner-val" id="v-first">0.20</span>
+
+      <span></span>
+      <span></span>
+      <button class="tuner-reset" onclick="resetTuner()">デフォルトに戻す</button>
+    </div>
+  </div>
   <div class="select-summary" id="select-summary">
     <span class="sel-sum-label">セレクト:</span>
     採用 <span class="sel-sum-pick" id="cnt-pick">0</span>
@@ -798,6 +896,84 @@ ALL_SHOTS.forEach(s => updateCardVisual(s.stem));
 updateSummary();
 
 // ---- セッションメモ localStorage 自動保存 ----
+
+// スコアチューナー
+(function() {{
+  const DEFAULTS = {{ sharpness: 0.50, exposure: 0.40, persons: 0.20, first: 0.20 }};
+  const filename = window.location.pathname.split('/').pop() || 'index.html';
+  const STORAGE_KEY = 'asa-weights-' + filename;
+
+  function scoreColor(v) {{
+    if (v >= 0.8) return '#22c55e';
+    if (v >= 0.5) return '#f59e0b';
+    return '#ef4444';
+  }}
+
+  function getWeights() {{
+    return {{
+      sharpness: parseFloat(document.getElementById('w-sharpness').value),
+      exposure:  parseFloat(document.getElementById('w-exposure').value),
+      persons:   parseFloat(document.getElementById('w-persons').value),
+      first:     parseFloat(document.getElementById('w-first').value),
+    }};
+  }}
+
+  function recompute() {{
+    const w = getWeights();
+    const total = w.sharpness + w.exposure + w.persons + w.first;
+    document.querySelectorAll('.card').forEach(card => {{
+      const sharp   = parseFloat(card.dataset.sharpness);
+      const expo    = parseFloat(card.dataset.exposure);
+      const p       = parseInt(card.dataset.persons);
+      const isFirst = card.dataset.position === 'first';
+      const raw = w.sharpness * sharp
+                + w.exposure  * expo
+                + w.persons   * Math.min(p / 3, 1.0)
+                + w.first     * (isFirst ? 1.0 : 0.0);
+      const normalized = total > 0 ? raw / total : 0;
+      const el = card.querySelector('.tech-main');
+      if (el) {{
+        el.textContent = '技術 ' + normalized.toFixed(2);
+        el.style.color = scoreColor(normalized);
+      }}
+    }});
+  }}
+
+  window.onSlider = function(sliderId, valId) {{
+    const val = parseFloat(document.getElementById(sliderId).value);
+    document.getElementById(valId).textContent = val.toFixed(2);
+    recompute();
+    try {{ localStorage.setItem(STORAGE_KEY, JSON.stringify(getWeights())); }} catch(e) {{}}
+  }};
+
+  window.resetTuner = function() {{
+    Object.entries(DEFAULTS).forEach(([k, v]) => {{
+      document.getElementById('w-' + k).value = v;
+      document.getElementById('v-' + k).textContent = v.toFixed(2);
+    }});
+    recompute();
+    try {{ localStorage.removeItem(STORAGE_KEY); }} catch(e) {{}}
+  }};
+
+  // ページ読み込み時に復元
+  try {{
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {{
+      const weights = JSON.parse(saved);
+      Object.entries(weights).forEach(([k, v]) => {{
+        const slider = document.getElementById('w-' + k);
+        const valEl  = document.getElementById('v-' + k);
+        if (slider && valEl) {{
+          slider.value = v;
+          valEl.textContent = parseFloat(v).toFixed(2);
+        }}
+      }});
+    }}
+  }} catch(e) {{}}
+  recompute();
+}})();
+
+// セッションメモ localStorage 自動保存
 (function() {{
   const textarea = document.getElementById('session-note');
   if (!textarea) return;
