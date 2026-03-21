@@ -289,7 +289,8 @@ Lightroom Classic で「メタデータをファイルから読み込む」を�
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage6/xmp_writer.py \
   --scores $OUTPUT_DIR/batch_scores.csv \
-  --image-dir <jpeg_dir>
+  --image-dir <jpeg_dir> \
+  --groups-csv $OUTPUT_DIR/stage2_groups.csv
 ```
 
 完了後、更新されたファイル数をユーザーに報告する。
