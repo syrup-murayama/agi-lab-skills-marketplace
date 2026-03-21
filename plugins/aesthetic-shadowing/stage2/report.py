@@ -7,6 +7,7 @@ stage2_groups.csv を読み込み、シーングループ単位で
 
 使い方:
   python report.py <jpeg_dir> <stage2_csv> [--output stage2_report.html]
+                   [--session-json session.json]
 
 例:
   python report.py \
@@ -17,6 +18,7 @@ stage2_groups.csv を読み込み、シーングループ単位で
 import argparse
 import csv
 import html
+import json
 import sys
 from itertools import groupby
 from pathlib import Path
@@ -154,7 +156,23 @@ def make_group_section(gid: int, members: list[dict], jpeg_dir: Path) -> str:
 
 # ---------- HTML生成 ----------
 
-def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
+def make_session_panel(session_info: dict) -> str:
+    title   = html.escape(session_info.get('title', ''))
+    date    = html.escape(session_info.get('date', ''))
+    purpose = html.escape(session_info.get('purpose', ''))
+    note    = html.escape(session_info.get('session_note', ''))
+    return f'''<div class="session-panel">
+  <div class="session-header">
+    <span class="session-title">📷 {title}</span>
+    <span class="session-date">{date}</span>
+  </div>
+  <div class="session-purpose">目的: {purpose}</div>
+  <div class="session-memo-label">メモ:</div>
+  <textarea id="session-note" class="session-note" placeholder="メモを入力…">{note}</textarea>
+</div>'''
+
+
+def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = None) -> str:
     # グループ単位に整理
     sorted_rows = sorted(rows, key=lambda r: (r['group_id'], r['datetime'], r['stem']))
     groups_html_parts = []
@@ -176,6 +194,10 @@ def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
     top10_threshold = sorted(tech_scores, reverse=True)[max(0, len(tech_scores) // 10 - 1)]
     n_top10  = sum(1 for s in tech_scores if s >= top10_threshold)
     tech_avg_color = tech_score_color(tech_avg)
+
+    session_panel_html = make_session_panel(session_info) if session_info else ''
+    # JS用: session_noteの初期値（JSON文字列としてエスケープ）
+    session_note_init = json.dumps(session_info.get('session_note', '') if session_info else '')
 
     return f'''<!DOCTYPE html>
 <html lang="ja">
@@ -418,6 +440,56 @@ def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
   .modal-close:hover {{ color: #f1f5f9; }}
 
   .hidden {{ display: none !important; }}
+
+  /* セッション情報パネル */
+  .session-panel {{
+    background: #0f1829;
+    border: 1px solid #1e2d45;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 18px;
+  }}
+  .session-header {{
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 6px;
+  }}
+  .session-title {{
+    font-size: 1rem;
+    font-weight: 700;
+    color: #f1f5f9;
+  }}
+  .session-date {{
+    font-size: 0.78rem;
+    color: #64748b;
+  }}
+  .session-purpose {{
+    font-size: 0.8rem;
+    color: #94a3b8;
+    margin-bottom: 10px;
+  }}
+  .session-memo-label {{
+    font-size: 0.72rem;
+    color: #64748b;
+    margin-bottom: 5px;
+  }}
+  .session-note {{
+    width: 100%;
+    min-height: 72px;
+    background: #0a0f1e;
+    border: 1px solid #1e2d45;
+    border-radius: 6px;
+    color: #e2e8f0;
+    font-size: 0.82rem;
+    font-family: inherit;
+    padding: 8px 10px;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.15s;
+  }}
+  .session-note:focus {{ border-color: #818cf8; }}
+  .session-note::placeholder {{ color: #334155; }}
 </style>
 </head>
 <body>
@@ -463,6 +535,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path) -> str:
 </div>
 
 <div class="content">
+{session_panel_html}
   <div class="counter" id="counter">表示: {n_groups} グループ</div>
   <div id="groups">
 {groups_html}
@@ -512,6 +585,28 @@ function closeModal(e) {{
   }}
 }}
 document.addEventListener('keydown', e => {{ if (e.key === 'Escape') closeModal(); }});
+
+// セッションメモ localStorage 自動保存
+(function() {{
+  const textarea = document.getElementById('session-note');
+  if (!textarea) return;
+  const filename = window.location.pathname.split('/').pop() || 'index.html';
+  const storageKey = 'asa-session-note-' + filename;
+  const initNote = {session_note_init};
+
+  // 復元: localStorage 優先、なければ session_note 初期値
+  const saved = localStorage.getItem(storageKey);
+  textarea.value = (saved !== null) ? saved : initNote;
+
+  // debounce 保存
+  let timer;
+  textarea.addEventListener('input', function() {{
+    clearTimeout(timer);
+    timer = setTimeout(function() {{
+      localStorage.setItem(storageKey, textarea.value);
+    }}, 500);
+  }});
+}})();
 </script>
 </body>
 </html>'''
@@ -526,7 +621,9 @@ def main() -> None:
     )
     parser.add_argument('jpeg_dir',   help='S2 JPEGフォルダ')
     parser.add_argument('stage2_csv', help='stage2_groups.csv')
-    parser.add_argument('--output',   default='stage2_report.html')
+    parser.add_argument('--output',       default='stage2_report.html')
+    parser.add_argument('--session-json', default=None,
+                        help='セッション情報JSONファイル (省略可)')
     args = parser.parse_args()
 
     jpeg_dir  = Path(args.jpeg_dir)
@@ -537,13 +634,22 @@ def main() -> None:
             print(f'エラー: {name} が見つかりません: {p}')
             sys.exit(1)
 
+    session_info = None
+    if args.session_json:
+        session_json_path = Path(args.session_json)
+        if not session_json_path.exists():
+            print(f'エラー: session-json が見つかりません: {session_json_path}')
+            sys.exit(1)
+        with open(session_json_path, encoding='utf-8') as f:
+            session_info = json.load(f)
+
     rows = load_groups(csv_path)
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
         output_path = csv_path.parent / output_path
 
-    html_str = generate_html(rows, jpeg_dir)
+    html_str = generate_html(rows, jpeg_dir, session_info)
     output_path.write_text(html_str, encoding='utf-8')
 
     n_groups = max(r['group_id'] for r in rows) + 1
