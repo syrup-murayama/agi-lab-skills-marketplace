@@ -65,6 +65,7 @@ class Shot:
     phash: imagehash.ImageHash
     hist: np.ndarray           # L*a*b* 3チャンネル 32-bin ヒストグラム結合
     person_count: int = 0
+    eye_score: float | None = None
     group_id: int = -1
     position: str = 'middle'   # first / last / middle / solo
     bonus_weight: float = 1.0
@@ -167,23 +168,41 @@ class PersonDetector:
         base = cv2.data.haarcascades
         self._frontal = cv2.CascadeClassifier(base + 'haarcascade_frontalface_default.xml')
         self._profile = cv2.CascadeClassifier(base + 'haarcascade_profileface.xml')
+        self._eye     = cv2.CascadeClassifier(base + 'haarcascade_eye.xml')
 
     def count(self, bgr: np.ndarray) -> int:
+        return self.count_and_eye_score(bgr)[0]
+
+    def count_and_eye_score(self, bgr: np.ndarray) -> tuple[int, float | None]:
+        """顔数と eye_score (顔なし=None、顔あり=目開き率) を返す。"""
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         cv2.equalizeHist(gray, gray)
 
         frontal = self._frontal.detectMultiScale(
             gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
         )
-        n_frontal = len(frontal) if not isinstance(frontal, tuple) else 0
-        if n_frontal > 0:
-            return n_frontal
+        faces = frontal if not isinstance(frontal, tuple) else []
+        n_faces = len(faces)
 
-        # 横顔（正面で見つからない場合のみ）
-        profile = self._profile.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        )
-        return len(profile) if not isinstance(profile, tuple) else 0
+        if n_faces == 0:
+            # 横顔（正面で見つからない場合のみ）— 横顔は目検出しない
+            profile = self._profile.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
+            )
+            n_profile = len(profile) if not isinstance(profile, tuple) else 0
+            return n_profile, None
+
+        # 正面顔ごとに目を検出
+        eyes_found = 0
+        for (fx, fy, fw, fh) in faces:
+            face_roi = gray[fy:fy + fh, fx:fx + fw]
+            eyes = self._eye.detectMultiScale(
+                face_roi, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20)
+            )
+            if not isinstance(eyes, tuple) and len(eyes) >= 1:
+                eyes_found += 1
+
+        return n_faces, eyes_found / n_faces
 
 
 # ---- グルーピング ----
@@ -375,13 +394,13 @@ def load_shots(
             continue
 
         hist = _lab_hist(bgr)
-        n_persons = detector.count(bgr)
+        n_persons, eye_score = detector.count_and_eye_score(bgr)
         sharp = _sharpness_raw(bgr)
         exp_score = _exposure_score(bgr)
 
         shots.append(Shot(
             path=p, stem=p.stem, dt=dt, phash=ph,
-            hist=hist, person_count=n_persons,
+            hist=hist, person_count=n_persons, eye_score=eye_score,
             sharpness_raw=sharp, exposure_score=exp_score,
         ))
 
@@ -490,7 +509,7 @@ def main() -> None:
 
     fieldnames = [
         'file', 'datetime', 'group_id', 'group_size',
-        'position', 'person_count',
+        'position', 'person_count', 'eye_score',
         'sharpness_score', 'exposure_score', 'technical_score',
         'bonus_weight', 'phash',
     ]
@@ -505,6 +524,7 @@ def main() -> None:
                 'group_size':      group_sizes[s.group_id],
                 'position':        s.position,
                 'person_count':    s.person_count,
+                'eye_score':       f'{s.eye_score:.4f}' if s.eye_score is not None else '',
                 'sharpness_score': f'{s.sharpness_score:.4f}',
                 'exposure_score':  f'{s.exposure_score:.4f}',
                 'technical_score': f'{s.technical_score:.4f}',

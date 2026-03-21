@@ -39,6 +39,7 @@ def load_groups(csv_path: Path) -> list[dict]:
                 'position':        row['position'],
                 'bonus_weight':    float(row['bonus_weight']),
                 'person_count':    int(float(row['person_count'])),
+                'eye_score':       float(row['eye_score']) if row.get('eye_score', '') != '' else None,
                 'sharpness_score': float(row.get('sharpness_score', 0.0)),
                 'exposure_score':  float(row.get('exposure_score', 0.0)),
                 'technical_score': float(row.get('technical_score', 0.0)),
@@ -93,6 +94,16 @@ def make_card(row: dict, jpeg_url: str) -> str:
     person_icon = '👤' if n_persons == 1 else ('👥' if n_persons >= 2 else '─')
     person_label = f'{n_persons}人' if n_persons > 0 else '0人'
 
+    eye_score = row.get('eye_score')
+    if eye_score is None:
+        eye_icon = ''
+    elif eye_score == 1.0:
+        eye_icon = ' 👁️'
+    elif eye_score > 0.0:
+        eye_icon = ' 👁️ △'
+    else:
+        eye_icon = ' 😑'
+
     tech  = row['technical_score']
     sharp = row['sharpness_score']
     expo  = row['exposure_score']
@@ -116,7 +127,7 @@ def make_card(row: dict, jpeg_url: str) -> str:
     <div class="card-name">{stem}</div>
     <div class="card-meta">
       <span class="card-time">{dt}</span>
-      <span class="card-person">{person_icon} {person_label}</span>
+      <span class="card-person">{person_icon} {person_label}{eye_icon}</span>
     </div>
     <div class="tech-row">
       <span class="tech-main" style="color:{tech_color}">技術 {tech:.2f}</span>
