@@ -43,6 +43,8 @@ def load_groups(csv_path: Path) -> list[dict]:
                 'sharpness_score': float(row.get('sharpness_score', 0.0)),
                 'exposure_score':  float(row.get('exposure_score', 0.0)),
                 'technical_score': float(row.get('technical_score', 0.0)),
+                'camera_rating':   int(float(row.get('camera_rating', 0) or 0)),
+                'near_rated':      row.get('near_rated', 'False').lower() == 'true',
             })
     return rows
 
@@ -66,7 +68,7 @@ def tech_score_color(score: float) -> str:
         return '#ef4444'
 
 
-def make_card(row: dict, jpeg_url: str) -> str:
+def make_card(row: dict, jpeg_url: str, has_camera_rating: bool = False) -> str:
     pos = row['position']
     stem = html.escape(row['stem'])
     dt = row['datetime'][11:19] if len(row['datetime']) >= 19 else ''
@@ -90,6 +92,15 @@ def make_card(row: dict, jpeg_url: str) -> str:
     tech_color = tech_score_color(tech)
     gid = row['group_id']
 
+    camera_rating_html = ''
+    if has_camera_rating:
+        cam_rating = row.get('camera_rating', 0)
+        near_rated = row.get('near_rated', False)
+        if cam_rating > 0:
+            camera_rating_html = f'<span class="cam-rating">撮影時 ★{cam_rating}</span>'
+        elif near_rated:
+            camera_rating_html = '<span class="cam-near">📷±</span>'
+
     return f'''<div class="card" tabindex="0" data-stem="{stem}" data-gid="{gid}" data-url="{jpeg_url}"
   data-sharpness="{sharp:.3f}" data-exposure="{expo:.3f}"
   data-persons="{n_persons}" data-position="{pos}"
@@ -107,6 +118,7 @@ def make_card(row: dict, jpeg_url: str) -> str:
     <div class="card-meta">
       <span class="card-time">{dt}</span>
       <span class="card-person">{person_icon} {person_label}{eye_icon}</span>
+      {camera_rating_html}
     </div>
     <div class="tech-row">
       <span class="tech-main" style="color:{tech_color}">技術 {tech:.2f}</span>
@@ -116,7 +128,7 @@ def make_card(row: dict, jpeg_url: str) -> str:
 </div>'''
 
 
-def make_group_section(gid: int, members: list[dict], jpeg_dir: Path) -> str:
+def make_group_section(gid: int, members: list[dict], jpeg_dir: Path, has_camera_rating: bool = False) -> str:
     size = members[0]['group_size']
     dt_start = members[0]['datetime'][11:19] if members[0]['datetime'] else '?'
     n_persons_avg = sum(m['person_count'] for m in members) / len(members)
@@ -124,11 +136,14 @@ def make_group_section(gid: int, members: list[dict], jpeg_dir: Path) -> str:
     max_tech_color = tech_score_color(max_tech)
 
     cards = '\n'.join(
-        make_card(m, find_jpeg(jpeg_dir, m['stem']))
+        make_card(m, find_jpeg(jpeg_dir, m['stem']), has_camera_rating)
         for m in members
     )
 
     person_summary = f'{n_persons_avg:.1f}人/枚'
+    cam_marker = ''
+    if has_camera_rating and any(m.get('camera_rating', 0) > 0 for m in members):
+        cam_marker = ' <span class="gcam">📷</span>'
 
     return f'''
 <section class="group" id="g{gid}">
@@ -137,7 +152,7 @@ def make_group_section(gid: int, members: list[dict], jpeg_dir: Path) -> str:
     <span class="gsize">{size}枚</span>
     <span class="gtime">{dt_start}</span>
     <span class="gtech" style="color:{max_tech_color}">最高技術 {max_tech:.2f}</span>
-    <span class="gpersons">👤 {person_summary}</span>
+    <span class="gpersons">👤 {person_summary}</span>{cam_marker}
   </div>
   <div class="group-cards">
 {cards}
@@ -164,11 +179,13 @@ def make_session_panel(session_info: dict) -> str:
 
 
 def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = None) -> str:
+    has_camera_rating = any(r.get('camera_rating', 0) > 0 for r in rows)
+
     sorted_rows = sorted(rows, key=lambda r: (r['group_id'], r['datetime'], r['stem']))
     groups_html_parts = []
     for gid, it in groupby(sorted_rows, key=lambda r: r['group_id']):
         members = list(it)
-        groups_html_parts.append(make_group_section(gid, members, jpeg_dir))
+        groups_html_parts.append(make_group_section(gid, members, jpeg_dir, has_camera_rating))
 
     groups_html = '\n'.join(groups_html_parts)
 
@@ -410,6 +427,9 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     margin-bottom: 5px;
   }}
   .card-person {{ color: #94a3b8; }}
+  .cam-rating {{ color: #ffd700; font-size: 0.65rem; font-weight: 600; }}
+  .cam-near   {{ color: #64748b; font-size: 0.6rem; }}
+  .gcam {{ font-size: 0.78rem; }}
   .tech-row {{
     display: flex;
     justify-content: space-between;
