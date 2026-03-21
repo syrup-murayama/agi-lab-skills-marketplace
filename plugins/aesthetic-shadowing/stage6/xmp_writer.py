@@ -54,15 +54,24 @@ def update_metadata(image_path: Path, star_rating: int) -> str:
         # RAW等は XMP サイドカーを作成/更新
         return "created_xmp" if _update_xmp_sidecar(image_path, star_rating) else "error"
 
+def _build_exiftool_args(star_rating: int) -> list[str]:
+    """
+    star_rating に応じた ExifTool タグ引数を返す。
+
+    -1 → xmp:Pick=-1 (Lightroom Classic 13.2+ の Reject フラグ)
+         namespace: http://ns.adobe.com/xap/1.0/
+         4〜5 はユーザーが Lightroom で現像時につける聖域 → AI は最大 ★3 を書き込む
+    0+ → XMP:Rating=N (通常の星レーティング、0=なし、1〜3)
+    """
+    if star_rating == -1:
+        return ["-XMP-xmp:Pick=-1"]
+    return [f"-XMP:Rating={star_rating}"]
+
+
 def _update_internal(image_path: Path, star_rating: int) -> bool:
     """ExifTool を使用してファイル本体を更新"""
     try:
-        cmd = [
-            "exiftool",
-            f"-XMP:Rating={star_rating}",
-            "-overwrite_original",
-            str(image_path)
-        ]
+        cmd = ["exiftool"] + _build_exiftool_args(star_rating) + ["-overwrite_original", str(image_path)]
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         return True
     except Exception as e:
@@ -73,17 +82,7 @@ def _update_xmp_sidecar(image_path: Path, star_rating: int) -> bool:
     """ExifTool を使用して XMP サイドカーファイルを生成/更新"""
     xmp_path = image_path.with_suffix(".xmp")
     try:
-        # exiftool は XMP ファイルに対しても同様に動作する
-        # ファイルがなければ作成し、あれば Rating だけを更新する
-        cmd = [
-            "exiftool",
-            f"-XMP:Rating={star_rating}",
-            "-overwrite_original",
-            str(xmp_path)
-        ]
-        # XMPが存在しない場合、ExifToolがデフォルトのタグを含めて新規作成するようにする
-        # (ただし単純に実行すると画像からタグをコピーしようとする場合があるため、
-        #  Ratingのみを確実に書き込む)
+        cmd = ["exiftool"] + _build_exiftool_args(star_rating) + ["-overwrite_original", str(xmp_path)]
         subprocess.run(cmd, check=True, capture_output=True, text=True)
         return True
     except Exception as e:
@@ -143,6 +142,11 @@ def run(scores_path: Path, image_dir: Path, groups_csv: Path | None = None) -> N
         if not filename:
             counts["error"] += 1
             continue
+
+        # AI スコアは最大 ★3 にキャップ
+        # 4〜5 はユーザーが Lightroom で現像時につける聖域
+        if star_rating > 3:
+            star_rating = 3
 
         # camera_rating > 0 であれば AI スコアを上書きしない
         stem = Path(filename).stem

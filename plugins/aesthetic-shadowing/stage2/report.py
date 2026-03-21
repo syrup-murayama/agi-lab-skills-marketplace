@@ -445,9 +445,9 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     pointer-events: none;
     transition: background 0.15s;
   }}
-  .select-overlay.sel-pick   {{ background: rgba(34,197,94,0.35); }}
-  .select-overlay.sel-hold   {{ background: rgba(245,158,11,0.35); }}
-  .select-overlay.sel-reject {{ background: rgba(239,68,68,0.35); }}
+  .select-overlay.sel-good {{ background: rgba(34,197,94,0.35); }}
+  .select-overlay.sel-fine {{ background: rgba(245,158,11,0.35); }}
+  .select-overlay.sel-keep {{ background: rgba(96,165,250,0.35); }}
 
   .select-badge {{
     position: absolute;
@@ -471,9 +471,9 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     padding: 0;
   }}
   .select-badge:hover {{ transform: scale(1.2); }}
-  .select-badge.sel-pick   {{ background: #22c55e; }}
-  .select-badge.sel-hold   {{ background: #f59e0b; }}
-  .select-badge.sel-reject {{ background: #ef4444; }}
+  .select-badge.sel-good {{ background: #22c55e; }}
+  .select-badge.sel-fine {{ background: #f59e0b; }}
+  .select-badge.sel-keep {{ background: #60a5fa; }}
 
   /* 除外ボタン・ラベル */
   .exclude-btn {{
@@ -628,10 +628,10 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     flex-wrap: wrap;
   }}
   .sel-sum-item {{ display: flex; align-items: baseline; gap: 4px; }}
-  .sel-sum-pick   {{ color: #22c55e; font-weight: 700; font-size: 1.1rem; }}
-  .sel-sum-hold   {{ color: #f59e0b; font-weight: 700; font-size: 1.1rem; }}
-  .sel-sum-reject {{ color: #ef4444; font-weight: 700; font-size: 1.1rem; }}
-  .sel-sum-none   {{ color: #475569; font-weight: 700; font-size: 1.1rem; }}
+  .sel-sum-good {{ color: #22c55e; font-weight: 700; font-size: 1.1rem; }}
+  .sel-sum-fine {{ color: #f59e0b; font-weight: 700; font-size: 1.1rem; }}
+  .sel-sum-keep {{ color: #60a5fa; font-weight: 700; font-size: 1.1rem; }}
+  .sel-sum-none {{ color: #475569; font-weight: 700; font-size: 1.1rem; }}
   .sel-sum-sublabel {{ font-size: 0.68rem; color: #64748b; }}
 
   /* スコアチューナーパネル */
@@ -781,16 +781,16 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
       <span class="sel-sum-label">セレクト</span>
       <div class="sel-sum-row">
         <div class="sel-sum-item">
-          <span class="sel-sum-pick" id="cnt-pick">0</span>
-          <span class="sel-sum-sublabel">採用</span>
+          <span class="sel-sum-good" id="cnt-good">0</span>
+          <span class="sel-sum-sublabel">GOOD</span>
         </div>
         <div class="sel-sum-item">
-          <span class="sel-sum-hold" id="cnt-hold">0</span>
-          <span class="sel-sum-sublabel">保留</span>
+          <span class="sel-sum-fine" id="cnt-fine">0</span>
+          <span class="sel-sum-sublabel">FINE</span>
         </div>
         <div class="sel-sum-item">
-          <span class="sel-sum-reject" id="cnt-reject">0</span>
-          <span class="sel-sum-sublabel">不採用</span>
+          <span class="sel-sum-keep" id="cnt-keep">0</span>
+          <span class="sel-sum-sublabel">KEEP</span>
         </div>
         <div class="sel-sum-item">
           <span class="sel-sum-none" id="cnt-none">{n_shots}</span>
@@ -855,7 +855,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   <img id="modal-img" src="" alt="">
   <div class="modal-footer">
     <span class="modal-name" id="modal-name"></span>
-    <span class="modal-hint">← → 同グループ内 &nbsp;|&nbsp; J/K 全体移動 &nbsp;|&nbsp; 1=✗ &nbsp;3=△ &nbsp;5=✓ &nbsp;|&nbsp; x=除外 &nbsp;u=解除</span>
+    <span class="modal-hint">← → 同グループ内 &nbsp;|&nbsp; J/K 全体移動 &nbsp;|&nbsp; 1=KEEP &nbsp;2=FINE &nbsp;3=GOOD &nbsp;|&nbsp; X=除外 &nbsp;U=解除</span>
   </div>
 </div>
 
@@ -971,9 +971,9 @@ document.addEventListener('keydown', function(e) {{
     return;
   }}
 
-  if (e.key === '1') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'reject'); return; }}
-  if (e.key === '3') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'hold');   return; }}
-  if (e.key === '5') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'pick');   return; }}
+  if (e.key === '1') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'keep'); return; }}
+  if (e.key === '2') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'fine'); return; }}
+  if (e.key === '3') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'good'); return; }}
   if (e.key === 'x' || e.key === 'X') {{
     if (currentShotIdx >= 0) setExcluded(ALL_SHOTS[currentShotIdx].stem);
     return;
@@ -993,9 +993,9 @@ function cardKeydown(e, card) {{
     openModal(card.dataset.url, stem, parseInt(card.dataset.gid));
     return;
   }}
-  if (e.key === '1') {{ e.preventDefault(); setSelect(stem, 'reject'); return; }}
-  if (e.key === '3') {{ e.preventDefault(); setSelect(stem, 'hold');   return; }}
-  if (e.key === '5') {{ e.preventDefault(); setSelect(stem, 'pick');   return; }}
+  if (e.key === '1') {{ e.preventDefault(); setSelect(stem, 'keep'); return; }}
+  if (e.key === '2') {{ e.preventDefault(); setSelect(stem, 'fine'); return; }}
+  if (e.key === '3') {{ e.preventDefault(); setSelect(stem, 'good'); return; }}
   if (e.key === 'x' || e.key === 'X') {{ e.preventDefault(); setExcluded(stem); return; }}
   if (e.key === 'u' || e.key === 'U') {{ e.preventDefault(); unsetExcluded(stem); return; }}
 }}
@@ -1017,7 +1017,7 @@ function saveSelectState() {{
 
 function toggleSelect(e, stem) {{
   if (e) e.stopPropagation();
-  const cycle = {{ 'pick': 'hold', 'hold': 'reject', 'reject': null }};
+  const cycle = {{ 'good': 'fine', 'fine': 'keep', 'keep': null }};
   const current = selectState[stem];
   const next = (current in cycle) ? cycle[current] : 'pick';
   setSelect(stem, next);
@@ -1042,23 +1042,23 @@ function updateCardVisual(stem) {{
   overlay.className = 'select-overlay';
   badge.className   = 'select-badge';
   badge.textContent = '';
-  if (state === 'pick')   {{ overlay.classList.add('sel-pick');   badge.classList.add('sel-pick');   badge.textContent = '✓'; }}
-  if (state === 'hold')   {{ overlay.classList.add('sel-hold');   badge.classList.add('sel-hold');   badge.textContent = '△'; }}
-  if (state === 'reject') {{ overlay.classList.add('sel-reject'); badge.classList.add('sel-reject'); badge.textContent = '✗'; }}
+  if (state === 'good') {{ overlay.classList.add('sel-good'); badge.classList.add('sel-good'); badge.textContent = '3'; }}
+  if (state === 'fine') {{ overlay.classList.add('sel-fine'); badge.classList.add('sel-fine'); badge.textContent = '2'; }}
+  if (state === 'keep') {{ overlay.classList.add('sel-keep'); badge.classList.add('sel-keep'); badge.textContent = '1'; }}
 }}
 
 function updateSummary() {{
   const total = ALL_SHOTS.length;
-  let pick = 0, hold = 0, reject = 0;
+  let good = 0, fine = 0, keep = 0;
   for (const v of Object.values(selectState)) {{
-    if (v === 'pick')        pick++;
-    else if (v === 'hold')   hold++;
-    else if (v === 'reject') reject++;
+    if (v === 'good')      good++;
+    else if (v === 'fine') fine++;
+    else if (v === 'keep') keep++;
   }}
-  document.getElementById('cnt-pick').textContent   = pick;
-  document.getElementById('cnt-hold').textContent   = hold;
-  document.getElementById('cnt-reject').textContent = reject;
-  document.getElementById('cnt-none').textContent   = total - pick - hold - reject;
+  document.getElementById('cnt-good').textContent = good;
+  document.getElementById('cnt-fine').textContent = fine;
+  document.getElementById('cnt-keep').textContent = keep;
+  document.getElementById('cnt-none').textContent = total - good - fine - keep;
 }}
 
 // ---- 除外フラグ ----
