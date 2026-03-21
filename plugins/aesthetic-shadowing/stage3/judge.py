@@ -31,6 +31,7 @@ import csv as _csv
 import json
 import mimetypes
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -62,7 +63,7 @@ HTML_TEMPLATE = """\
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    background: #1a1a1a;
+    background: #111;
     color: #e0e0e0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     min-height: 100vh;
@@ -72,62 +73,78 @@ HTML_TEMPLATE = """\
   }
   #header {
     width: 100%;
-    max-width: 960px;
-    padding: 16px 20px 8px;
+    max-width: 1200px;
+    padding: 10px 20px 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  #header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
   #session-name {
-    font-size: 13px;
-    color: #888;
-    margin-bottom: 8px;
-  }
-  #progress-bar-wrap {
-    background: #333;
-    border-radius: 4px;
-    height: 8px;
-    width: 100%;
-  }
-  #progress-bar {
-    background: #4a9eff;
-    height: 8px;
-    border-radius: 4px;
-    transition: width 0.3s ease;
+    font-size: 12px;
+    color: #555;
+    letter-spacing: 0.04em;
   }
   #progress-text {
-    font-size: 13px;
-    color: #aaa;
-    margin-top: 6px;
-    text-align: right;
+    font-size: 12px;
+    color: #555;
+  }
+  #progress-bar-wrap {
+    background: #222;
+    border-radius: 5px;
+    height: 10px;
+    width: 100%;
+    position: relative;
+    overflow: hidden;
+  }
+  #progress-bar {
+    background: linear-gradient(90deg, #4a9eff, #3dd68c);
+    height: 10px;
+    border-radius: 5px;
+    transition: width 0.4s ease;
+    position: relative;
+  }
+  #progress-pct {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 9px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.85);
+    line-height: 1;
+    pointer-events: none;
   }
   #image-wrap {
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 16px 20px;
+    padding: 10px 20px 8px;
     width: 100%;
-    max-width: 960px;
+    max-width: 1200px;
   }
   #photo {
     max-width: 100%;
-    max-height: calc(100vh - 220px);
+    max-height: calc(100vh - 190px);
     border-radius: 6px;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+    box-shadow: 0 6px 32px rgba(0,0,0,0.7);
     object-fit: contain;
+    transition: opacity 0.1s ease;
   }
-  #meta {
-    font-size: 12px;
-    color: #666;
-    text-align: center;
-    margin-top: 8px;
-  }
+  #photo.fading { opacity: 0; }
   #controls {
     width: 100%;
-    max-width: 960px;
-    padding: 12px 20px 24px;
+    max-width: 1200px;
+    padding: 8px 20px 20px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
   }
   #rating-buttons {
     display: flex;
@@ -136,50 +153,56 @@ HTML_TEMPLATE = """\
     justify-content: center;
   }
   .rating-btn {
-    background: #2a2a2a;
-    border: 2px solid #444;
+    background: #1e1e1e;
+    border: 2px solid #333;
     color: #e0e0e0;
-    font-size: 20px;
-    padding: 12px 20px;
-    border-radius: 8px;
+    font-size: 22px;
+    padding: 16px 20px;
+    border-radius: 12px;
     cursor: pointer;
     transition: all 0.15s ease;
-    min-width: 70px;
+    min-width: 80px;
     text-align: center;
+    line-height: 1.2;
   }
-  .rating-btn:hover { background: #3a3a3a; border-color: #4a9eff; }
-  .rating-btn[data-rating="5"]:hover { border-color: #ffd700; }
-  .rating-btn[data-rating="4"]:hover { border-color: #ffa500; }
-  .rating-btn[data-rating="3"]:hover { border-color: #888; }
-  .rating-btn[data-rating="2"]:hover { border-color: #ff7777; }
-  .rating-btn[data-rating="1"]:hover { border-color: #ff3333; }
-  .rating-btn .key-hint {
-    display: block;
-    font-size: 11px;
-    color: #666;
-    margin-top: 2px;
-  }
+  .rating-btn[data-rating="1"] { border-color: #5a2222; }
+  .rating-btn[data-rating="2"] { border-color: #5a3d1a; }
+  .rating-btn[data-rating="3"] { border-color: #2e2e2e; }
+  .rating-btn[data-rating="4"] { border-color: #1a3a5a; }
+  .rating-btn[data-rating="5"] { border-color: #5a4d00; }
+  .rating-btn[data-rating="1"]:hover { background: #3a1515; border-color: #e05555; box-shadow: 0 0 16px rgba(224,85,85,0.3); }
+  .rating-btn[data-rating="2"]:hover { background: #3a2510; border-color: #e08844; box-shadow: 0 0 16px rgba(224,136,68,0.3); }
+  .rating-btn[data-rating="3"]:hover { background: #2a2a2a; border-color: #888; box-shadow: 0 0 16px rgba(136,136,136,0.2); }
+  .rating-btn[data-rating="4"]:hover { background: #0f2a4a; border-color: #4a9eff; box-shadow: 0 0 16px rgba(74,158,255,0.3); }
+  .rating-btn[data-rating="5"]:hover { background: #3a3000; border-color: #ffd700; box-shadow: 0 0 16px rgba(255,215,0,0.35); }
+  .rating-btn .emoji { display: block; font-size: 24px; margin-bottom: 4px; }
   .rating-btn .rating-label {
     display: block;
-    font-size: 0.7rem;
-    color: #888;
+    font-size: 10px;
+    color: #666;
     margin-top: 4px;
     white-space: nowrap;
   }
+  .rating-btn .key-hint {
+    display: block;
+    font-size: 10px;
+    color: #444;
+    margin-top: 2px;
+  }
   #skip-btn {
     background: transparent;
-    border: 1px solid #444;
-    color: #888;
-    font-size: 14px;
-    padding: 8px 24px;
+    border: 1px solid #333;
+    color: #555;
+    font-size: 13px;
+    padding: 7px 22px;
     border-radius: 6px;
     cursor: pointer;
     transition: all 0.15s ease;
   }
-  #skip-btn:hover { border-color: #888; color: #ccc; }
+  #skip-btn:hover { border-color: #666; color: #aaa; }
   #shortcut-hint {
-    font-size: 12px;
-    color: #555;
+    font-size: 11px;
+    color: #444;
   }
   /* 完了画面 */
   #done-screen {
@@ -188,13 +211,21 @@ HTML_TEMPLATE = """\
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    gap: 20px;
+    gap: 24px;
     text-align: center;
     padding: 40px;
   }
-  #done-screen h1 { font-size: 36px; }
-  #done-screen p { color: #aaa; font-size: 16px; }
-  #done-screen .stats { color: #4a9eff; font-size: 18px; }
+  #done-icon {
+    font-size: 80px;
+    animation: pop-in 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
+  }
+  @keyframes pop-in {
+    from { transform: scale(0.3); opacity: 0; }
+    to   { transform: scale(1);   opacity: 1; }
+  }
+  #done-screen h1 { font-size: 32px; font-weight: 700; color: #e0e0e0; }
+  #done-stats { color: #4a9eff; font-size: 20px; font-weight: 600; }
+  #done-hint { color: #555; font-size: 14px; }
   /* フラッシュ効果 */
   #flash {
     position: fixed;
@@ -210,44 +241,47 @@ HTML_TEMPLATE = """\
 <div id="flash"></div>
 
 <div id="header">
-  <div id="session-name"></div>
-  <div id="progress-bar-wrap"><div id="progress-bar" style="width:0%"></div></div>
-  <div id="progress-text">0 / 0</div>
+  <div id="header-top">
+    <div id="session-name"></div>
+    <div id="progress-text">0 / 0</div>
+  </div>
+  <div id="progress-bar-wrap">
+    <div id="progress-bar" style="width:0%">
+      <span id="progress-pct"></span>
+    </div>
+  </div>
 </div>
 
 <div id="image-wrap">
-  <div>
-    <img id="photo" src="" alt="Loading...">
-    <div id="meta"></div>
-  </div>
+  <img id="photo" src="" alt="Loading...">
 </div>
 
 <div id="controls">
   <div id="rating-buttons">
     <button class="rating-btn" data-rating="1">
-      ★☆☆☆☆
-      <span class="key-hint">[ 1 ]</span>
+      <span class="emoji">🚫</span>
       <span class="rating-label">絶対に使わない</span>
+      <span class="key-hint">[ 1 ]</span>
     </button>
     <button class="rating-btn" data-rating="2">
-      ★★☆☆☆
-      <span class="key-hint">[ 2 ]</span>
+      <span class="emoji">👎</span>
       <span class="rating-label">不採用</span>
+      <span class="key-hint">[ 2 ]</span>
     </button>
     <button class="rating-btn" data-rating="3">
-      ★★★☆☆
-      <span class="key-hint">[ 3 ]</span>
+      <span class="emoji">🤔</span>
       <span class="rating-label">保留</span>
+      <span class="key-hint">[ 3 ]</span>
     </button>
     <button class="rating-btn" data-rating="4">
-      ★★★★☆
-      <span class="key-hint">[ 4 ]</span>
+      <span class="emoji">👍</span>
       <span class="rating-label">採用</span>
+      <span class="key-hint">[ 4 ]</span>
     </button>
     <button class="rating-btn" data-rating="5">
-      ★★★★★
-      <span class="key-hint">[ 5 ]</span>
+      <span class="emoji">⭐</span>
       <span class="rating-label">絶対に使う</span>
+      <span class="key-hint">[ 5 ]</span>
     </button>
   </div>
   <button id="skip-btn">スキップ &nbsp;[ S ]</button>
@@ -255,9 +289,10 @@ HTML_TEMPLATE = """\
 </div>
 
 <div id="done-screen">
-  <h1>✅ 完了</h1>
-  <p class="stats" id="done-stats"></p>
-  <p>結果を保存しました。このタブを閉じてください。</p>
+  <div id="done-icon">✓</div>
+  <h1>セレクト完了！</h1>
+  <p id="done-stats"></p>
+  <p id="done-hint">ウィンドウを閉じてください</p>
 </div>
 
 <script>
@@ -273,7 +308,6 @@ async function loadStatus() {
   const data = await res.json();
   STATE.samples = data.samples;
   STATE.sessionName = data.session_name;
-  // 最初の未評価インデックスを探す
   STATE.currentIndex = STATE.samples.findIndex(
     s => s.human_rating === null && !s.skipped
   );
@@ -287,14 +321,15 @@ function render() {
     s => s.human_rating !== null || s.skipped
   ).length;
 
-  // セッション名
   const sessionEl = document.getElementById("session-name");
-  sessionEl.textContent = STATE.sessionName ? `セッション: ${STATE.sessionName}` : "";
+  sessionEl.textContent = STATE.sessionName ? `📷 ${STATE.sessionName}` : "";
 
-  // 進捗
   const pct = total > 0 ? (completed / total) * 100 : 0;
+  const pctRounded = Math.round(pct);
   document.getElementById("progress-bar").style.width = pct + "%";
   document.getElementById("progress-text").textContent = `${completed} / ${total}`;
+  const pctEl = document.getElementById("progress-pct");
+  pctEl.textContent = pct >= 15 ? pctRounded + "%" : "";
 
   if (STATE.currentIndex >= total) {
     showDone(completed, total);
@@ -302,9 +337,8 @@ function render() {
   }
 
   const entry = STATE.samples[STATE.currentIndex];
-  document.getElementById("photo").src = `/image/${encodeURIComponent(entry.file)}`;
-  document.getElementById("meta").textContent =
-    `グループ${entry.group_id}  /  technical: ${entry.technical_score.toFixed(2)}  /  ${entry.file}`;
+  const img = document.getElementById("photo");
+  img.src = `/image/${encodeURIComponent(entry.file)}`;
 }
 
 function showDone(rated, total) {
@@ -313,12 +347,12 @@ function showDone(rated, total) {
   document.getElementById("controls").style.display = "none";
   const doneEl = document.getElementById("done-screen");
   doneEl.style.display = "flex";
-  document.getElementById("done-stats").textContent = `${rated}枚 / ${total}枚 を評価しました`;
+  document.getElementById("done-stats").textContent = `${rated}枚の写真を評価しました`;
 }
 
 function flash() {
   const el = document.getElementById("flash");
-  el.style.opacity = "0.25";
+  el.style.opacity = "0.2";
   setTimeout(() => { el.style.opacity = "0"; }, 80);
 }
 
@@ -334,12 +368,11 @@ async function submitRating(rating) {
     });
     STATE.samples[STATE.currentIndex].human_rating = rating;
     STATE.samples[STATE.currentIndex].skipped = false;
-    // 次の未評価へ
     const next = STATE.samples.findIndex(
       (s, i) => i > STATE.currentIndex && s.human_rating === null && !s.skipped
     );
-    STATE.currentIndex = next === -1 ? STATE.samples.length : next;
-    render();
+    const nextIndex = next === -1 ? STATE.samples.length : next;
+    await fadeToNext(nextIndex);
   } finally {
     STATE.busy = false;
   }
@@ -359,20 +392,27 @@ async function submitSkip() {
     const next = STATE.samples.findIndex(
       (s, i) => i > STATE.currentIndex && s.human_rating === null && !s.skipped
     );
-    STATE.currentIndex = next === -1 ? STATE.samples.length : next;
-    render();
+    const nextIndex = next === -1 ? STATE.samples.length : next;
+    await fadeToNext(nextIndex);
   } finally {
     STATE.busy = false;
   }
 }
 
-// ボタンイベント
+async function fadeToNext(nextIndex) {
+  const img = document.getElementById("photo");
+  img.classList.add("fading");
+  await new Promise(r => setTimeout(r, 100));
+  STATE.currentIndex = nextIndex;
+  render();
+  img.classList.remove("fading");
+}
+
 document.querySelectorAll(".rating-btn").forEach(btn => {
   btn.addEventListener("click", () => submitRating(parseInt(btn.dataset.rating)));
 });
 document.getElementById("skip-btn").addEventListener("click", submitSkip);
 
-// キーボードショートカット
 document.addEventListener("keydown", e => {
   if (e.repeat) return;
   if (["1","2","3","4","5"].includes(e.key)) {
@@ -382,7 +422,6 @@ document.addEventListener("keydown", e => {
   }
 });
 
-// 初期化
 loadStatus();
 </script>
 </body>
@@ -726,12 +765,13 @@ def _create_server(
     handler_class,
     start_port: int,
     max_tries: int = 10,
+    bind_host: str = "127.0.0.1",
 ) -> tuple[HTTPServer, int]:
     """HTTPServer をポート競合なく起動する（TOCTOU回避のため直接バインドで試す）。"""
     for i in range(max_tries):
         port = start_port + i
         try:
-            server = HTTPServer(("127.0.0.1", port), handler_class)
+            server = HTTPServer((bind_host, port), handler_class)
             return server, port
         except OSError:
             if i < max_tries - 1:
@@ -748,6 +788,7 @@ def run_browser_session(
     session_name: str,
     created_at: str,
     start_port: int = 8765,
+    bind_host: str = "127.0.0.1",
 ) -> None:
     app = _AppState(
         samples=samples,
@@ -763,7 +804,7 @@ def run_browser_session(
         return
 
     try:
-        server, port = _create_server(_make_handler(app), start_port)
+        server, port = _create_server(_make_handler(app), start_port, bind_host=bind_host)
     except OSError as e:
         print(f"⚠️  HTTPサーバーの起動に失敗しました: {e}", file=sys.stderr)
         sys.exit(1)
@@ -776,6 +817,13 @@ def run_browser_session(
 
     url = f"http://localhost:{port}"
     print(f"サーバー起動: {url}")
+    if bind_host == "0.0.0.0":
+        try:
+            hostname = socket.gethostname()
+            lan_ip = socket.gethostbyname(hostname)
+            print(f"LAN共有URL: http://{lan_ip}:{port}")
+        except Exception:
+            print("LAN共有URL: (IPアドレス取得失敗)")
     print("ブラウザでレーティングを行ってください。完了後にサーバーが自動停止します。")
     print("中断する場合は Ctrl+C を押してください。")
 
@@ -837,6 +885,8 @@ def main() -> None:
                         help="選定する代表カット枚数。'auto'（デフォルト）で全グループ数の10%%、min=20・max=50を自動算出。整数指定でオーバーライド可")
     parser.add_argument("--port",     type=int, default=8765,
                         help="HTTPサーバーのポート番号（使用中なら自動インクリメント）")
+    parser.add_argument("--lan",      action="store_true",
+                        help="LANからのアクセスを許可（0.0.0.0でバインド）")
     args = parser.parse_args()
 
     jpeg_dir = Path(args.jpeg_dir)
@@ -912,6 +962,7 @@ def main() -> None:
         session_name=session_name,
         created_at=created_at,
         start_port=args.port,
+        bind_host="0.0.0.0" if args.lan else "127.0.0.1",
     )
 
 
