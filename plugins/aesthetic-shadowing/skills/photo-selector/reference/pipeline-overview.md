@@ -25,19 +25,19 @@
    代表30枚にユーザーがレーティング
        │
        ▼
-   Stage 4: 審美眼ルール抽出（LLM）        ← 実装中
-   profile.py → style_profile.json
+   Stage 4: 審美眼プロファイル生成
+   profile.py → aesthetic_profile.json
    「このユーザーが好む写真の特徴」を言語化
        │
        ▼
-   Stage 5: バッチ自動採点（LLM）           ← 実装中
-   batch_score.py → final_scores.csv
+   Stage 5: CLIPバッチ自動採点（ローカル処理）
+   score.py → batch_scores.csv
    全グループにスタイルルールを適用
        │
        ▼
-   Stage 6: XMPサイドカー書き出し           ← 実装中
-   export_xmp.py → *.xmp
-   Lightroom / Capture One 対応
+   Stage 6: メタデータ書き出し (Hybrid)
+   xmp_writer.py → JPEG直接 / RAWサイドカー
+   Lightroom Classic 対応 (XMP:Rating)
 ```
 
 ---
@@ -147,21 +147,21 @@ filename, group_id, group_type, position_in_group, tech_score, is_representative
 
 ---
 
-## Stage 4〜6（実装中）
+## Stage 4〜6
 
-### Stage 4: 審美眼ルール抽出
+### Stage 4: 審美眼プロファイル生成
 - `rated_samples.json` を分析し「このユーザーが好む写真の特徴」を言語化
-- Claude (Sonnet) がルールを生成 → `style_profile.json`
+- Claude がプロファイルを生成 → `aesthetic_profile.json`
 
-### Stage 5: バッチ自動採点
-- 全グループにスタイルルールを適用
-- 信頼度スコアも付与（低信頼グループはSpotCheck対象）
-- 出力: `final_scores.csv`
+### Stage 5: CLIPバッチ自動採点
+- ローカル CLIP モデルを使用して全カットをスコアリング
+- 出力: `batch_scores.csv`
 
-### Stage 6: XMPサイドカー書き出し
-- Lightroom/Capture One が読み込める `.xmp` ファイルを生成
-- レーティング5→★5、4→★4... として書き出し
-- `xmpDM:pick` フラグも設定（-1=却下、0=未評価、1=採用）
+### Stage 6: メタデータ書き出し
+- JPEG/TIFF: ExifTool を使用してファイル本体の `XMP:Rating` を直接書き換える
+- RAW (CR3/ARW/NEF等): 同名の `.xmp` サイドカーファイルを生成または更新
+- Lightroom Classic 対応
+
 
 ---
 
