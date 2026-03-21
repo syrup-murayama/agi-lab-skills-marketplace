@@ -824,7 +824,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   <img id="modal-img" src="" alt="">
   <div class="modal-footer">
     <span class="modal-name" id="modal-name"></span>
-    <span class="modal-hint">← → 同グループ内 &nbsp;|&nbsp; J/K 全体移動 &nbsp;|&nbsp; 1=✗ &nbsp;3=△ &nbsp;5=✓ &nbsp;|&nbsp; x=除外</span>
+    <span class="modal-hint">← → 同グループ内 &nbsp;|&nbsp; J/K 全体移動 &nbsp;|&nbsp; 1=✗ &nbsp;3=△ &nbsp;5=✓ &nbsp;|&nbsp; x=除外 &nbsp;u=解除</span>
   </div>
 </div>
 
@@ -944,7 +944,11 @@ document.addEventListener('keydown', function(e) {{
   if (e.key === '3') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'hold');   return; }}
   if (e.key === '5') {{ if (currentShotIdx >= 0) setSelect(ALL_SHOTS[currentShotIdx].stem, 'pick');   return; }}
   if (e.key === 'x' || e.key === 'X') {{
-    if (currentShotIdx >= 0) toggleExclude(null, ALL_SHOTS[currentShotIdx].stem);
+    if (currentShotIdx >= 0) setExcluded(ALL_SHOTS[currentShotIdx].stem);
+    return;
+  }}
+  if (e.key === 'u' || e.key === 'U') {{
+    if (currentShotIdx >= 0) unsetExcluded(ALL_SHOTS[currentShotIdx].stem);
     return;
   }}
 }});
@@ -961,7 +965,8 @@ function cardKeydown(e, card) {{
   if (e.key === '1') {{ e.preventDefault(); setSelect(stem, 'reject'); return; }}
   if (e.key === '3') {{ e.preventDefault(); setSelect(stem, 'hold');   return; }}
   if (e.key === '5') {{ e.preventDefault(); setSelect(stem, 'pick');   return; }}
-  if (e.key === 'x' || e.key === 'X') {{ e.preventDefault(); toggleExclude(e, stem); return; }}
+  if (e.key === 'x' || e.key === 'X') {{ e.preventDefault(); setExcluded(stem); return; }}
+  if (e.key === 'u' || e.key === 'U') {{ e.preventDefault(); unsetExcluded(stem); return; }}
 }}
 
 // ---- セレクト管理 ----
@@ -1040,16 +1045,23 @@ function saveExcludeState() {{
   try {{ localStorage.setItem(EXCLUDE_KEY, JSON.stringify(excludeState)); }} catch(e) {{}}
 }}
 
-function toggleExclude(e, stem) {{
-  if (e) e.stopPropagation();
-  if (excludeState[stem]) {{
-    delete excludeState[stem];
-  }} else {{
-    excludeState[stem] = true;
-  }}
+function setExcluded(stem) {{
+  excludeState[stem] = true;
   saveExcludeState();
   updateCardExcludeVisual(stem);
   applyAllFilters();
+}}
+
+function unsetExcluded(stem) {{
+  delete excludeState[stem];
+  saveExcludeState();
+  updateCardExcludeVisual(stem);
+  applyAllFilters();
+}}
+
+function toggleExclude(e, stem) {{
+  if (e) e.stopPropagation();
+  if (excludeState[stem]) {{ unsetExcluded(stem); }} else {{ setExcluded(stem); }}
 }}
 
 function updateCardExcludeVisual(stem) {{
