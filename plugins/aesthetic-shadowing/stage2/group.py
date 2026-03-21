@@ -22,6 +22,7 @@ Stage 2 Step A: シーングルーピング + 技術スコアリング
 
 import argparse
 import csv
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -73,6 +74,24 @@ class Shot:
     sharpness_score: float = 0.0  # グループ内相対スコア 0.0〜1.0
     exposure_score: float = 0.0   # 露出スコア 0.0〜1.0
     technical_score: float = 0.0  # 総合技術スコア 0.0〜1.0
+    camera_rating: int = 0        # 0=未設定、1〜5=カメラ内XMPレーティング
+    near_rated: bool = False       # 同グループの前後カットにcamera_rating>0があるか
+
+
+# ---- カメラ内XMPレーティング ----
+
+def read_camera_rating(jpeg_path: Path) -> int:
+    """JPEGの先頭64KBからXMP埋め込みの <xmp:Rating>N</xmp:Rating> を読み取る。見つからなければ0を返す。"""
+    try:
+        with open(jpeg_path, 'rb') as f:
+            chunk = f.read(65536)
+        text = chunk.decode('utf-8', errors='ignore')
+        m = re.search(r'<xmp:Rating>(\d+)</xmp:Rating>', text)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return 0
 
 
 # ---- EXIF ----
@@ -344,6 +363,21 @@ def compute_technical_scores(shots: list[Shot]) -> None:
             )
 
 
+def assign_near_rated(shots: list[Shot]) -> None:
+    """グループ内でcamera_rating>0のショットの前後1枚にnear_rated=Trueを設定する。"""
+    by_group: dict[int, list[Shot]] = {}
+    for s in shots:
+        by_group.setdefault(s.group_id, []).append(s)
+
+    for members in by_group.values():
+        for i, m in enumerate(members):
+            if m.camera_rating > 0:
+                if i > 0:
+                    members[i - 1].near_rated = True
+                if i < len(members) - 1:
+                    members[i + 1].near_rated = True
+
+
 # ---- 読み込み ----
 
 def load_rejected_stems(xmp_dir: Path) -> set[str]:
@@ -397,11 +431,13 @@ def load_shots(
         n_persons, eye_score = detector.count_and_eye_score(bgr)
         sharp = _sharpness_raw(bgr)
         exp_score = _exposure_score(bgr)
+        cam_rating = read_camera_rating(p)
 
         shots.append(Shot(
             path=p, stem=p.stem, dt=dt, phash=ph,
             hist=hist, person_count=n_persons, eye_score=eye_score,
             sharpness_raw=sharp, exposure_score=exp_score,
+            camera_rating=cam_rating,
         ))
 
         if verbose and (i + 1) % 50 == 0:
@@ -477,6 +513,7 @@ def main() -> None:
     merge_solo_groups(shots, args.solo_merge_gap)
     assign_positions(shots, enable_bonus=args.enable_position_bonus)
     compute_technical_scores(shots)
+    assign_near_rated(shots)
 
     n_groups = max(s.group_id for s in shots) + 1
     t_total = time.time() - t_start
@@ -511,7 +548,7 @@ def main() -> None:
         'file', 'datetime', 'group_id', 'group_size',
         'position', 'person_count', 'eye_score',
         'sharpness_score', 'exposure_score', 'technical_score',
-        'bonus_weight', 'phash',
+        'bonus_weight', 'camera_rating', 'near_rated', 'phash',
     ]
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -529,6 +566,8 @@ def main() -> None:
                 'exposure_score':  f'{s.exposure_score:.4f}',
                 'technical_score': f'{s.technical_score:.4f}',
                 'bonus_weight':    s.bonus_weight,
+                'camera_rating':   s.camera_rating,
+                'near_rated':      s.near_rated,
                 'phash':           str(s.phash),
             })
 
