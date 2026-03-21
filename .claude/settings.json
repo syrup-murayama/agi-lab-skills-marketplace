@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(plugins/aesthetic-shadowing/stage1/.venv/bin/python plugins/aesthetic-shadowing/stage*/*.py *)",
+      "Bash(open *.html)",
+      "Bash(mkdir -p *)",
+      "Bash(git add plugins/aesthetic-shadowing/*)",
+      "Bash(git commit *)",
+      "Bash(git log *)",
+      "Bash(git status)",
+      "Bash(git diff *)"
+    ]
+  }
+}
