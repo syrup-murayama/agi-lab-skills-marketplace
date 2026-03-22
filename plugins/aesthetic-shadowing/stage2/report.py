@@ -20,6 +20,7 @@ import csv
 import html
 import json
 import sys
+import threading
 from itertools import groupby
 from pathlib import Path
 
@@ -49,11 +50,13 @@ def load_groups(csv_path: Path) -> list[dict]:
     return rows
 
 
-def find_jpeg(jpeg_dir: Path, stem: str) -> str:
+def find_jpeg(jpeg_dir: Path, stem: str, img_base: str = 'file') -> str:
     for ext in ('.JPG', '.jpg', '.jpeg', '.JPEG'):
         p = jpeg_dir / (stem + ext)
         if p.exists():
-            return p.as_uri()
+            if img_base == 'file':
+                return p.as_uri()
+            return f'{img_base}/{stem}{ext}'
     return ''
 
 
@@ -130,7 +133,7 @@ def make_card(row: dict, jpeg_url: str, has_camera_rating: bool = False) -> str:
 </div>'''
 
 
-def make_group_section(gid: int, members: list[dict], jpeg_dir: Path, has_camera_rating: bool = False) -> str:
+def make_group_section(gid: int, members: list[dict], jpeg_dir: Path, has_camera_rating: bool = False, img_base: str = 'file') -> str:
     size = members[0]['group_size']
     dt_start = members[0]['datetime'][11:19] if members[0]['datetime'] else '?'
     n_persons_avg = sum(m['person_count'] for m in members) / len(members)
@@ -138,7 +141,7 @@ def make_group_section(gid: int, members: list[dict], jpeg_dir: Path, has_camera
     max_tech_color = tech_score_color(max_tech)
 
     cards = '\n'.join(
-        make_card(m, find_jpeg(jpeg_dir, m['stem']), has_camera_rating)
+        make_card(m, find_jpeg(jpeg_dir, m['stem'], img_base), has_camera_rating)
         for m in members
     )
 
@@ -180,14 +183,15 @@ def make_session_panel(session_info: dict) -> str:
 </div>'''
 
 
-def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = None) -> str:
+def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = None,
+                  img_base: str = 'file', server_mode: bool = False) -> str:
     has_camera_rating = any(r.get('camera_rating', 0) > 0 for r in rows)
 
     sorted_rows = sorted(rows, key=lambda r: (r['group_id'], r['datetime'], r['stem']))
     groups_html_parts = []
     for gid, it in groupby(sorted_rows, key=lambda r: r['group_id']):
         members = list(it)
-        groups_html_parts.append(make_group_section(gid, members, jpeg_dir, has_camera_rating))
+        groups_html_parts.append(make_group_section(gid, members, jpeg_dir, has_camera_rating, img_base))
 
     groups_html = '\n'.join(groups_html_parts)
 
@@ -204,10 +208,12 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     session_note_init = json.dumps(session_info.get('session_note', '') if session_info else '')
 
     all_shots_json = json.dumps(
-        [{'url': find_jpeg(jpeg_dir, r['stem']), 'stem': r['stem'], 'gid': r['group_id']}
+        [{'url': find_jpeg(jpeg_dir, r['stem'], img_base), 'stem': r['stem'], 'gid': r['group_id']}
          for r in sorted_rows],
         ensure_ascii=False,
     )
+    server_mode_js = 'true' if server_mode else 'false'
+    confirm_btn_display = '' if server_mode else 'display:none'
 
     return f'''<!DOCTYPE html>
 <html lang="ja">
@@ -705,6 +711,21 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     white-space: nowrap;
   }}
   .tuner-reset:hover {{ border-color: #818cf8; color: #818cf8; }}
+  .tuner-confirm {{
+    grid-column: 3;
+    margin-top: 4px;
+    padding: 3px 8px;
+    border-radius: 10px;
+    border: 1px solid #1e4d3a;
+    background: transparent;
+    color: #22c55e;
+    font-size: 0.68rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }}
+  .tuner-confirm:hover {{ border-color: #22c55e; background: #0d2a1f; }}
+  .tuner-confirm:disabled {{ opacity: 0.5; cursor: default; }}
 
   /* フィルタパネル */
   .filter-panel {{
@@ -827,6 +848,9 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
         <span></span>
         <span></span>
         <button class="tuner-reset" onclick="resetTuner()">デフォルトに戻す</button>
+        <span></span>
+        <span></span>
+        <button class="tuner-confirm" id="btn-confirm-weights" onclick="confirmWeights()" style="{confirm_btn_display}">このウェイトで確定</button>
       </div>
     </div>
 
@@ -867,6 +891,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
 
 <script>
 const _FILENAME = window.location.pathname.split('/').pop() || 'report.html';
+const _SERVER_MODE = {server_mode_js};
 
 // ---- サイドパネル ----
 const SIDEBAR_KEY = 'asa-sidebar-' + _FILENAME;
@@ -1234,6 +1259,33 @@ function applyAllFilters() {{
     try {{ localStorage.removeItem(STORAGE_KEY); }} catch(e) {{}}
   }};
 
+  window.confirmWeights = function() {{
+    if (!_SERVER_MODE) return;
+    const w = getWeights();
+    const btn = document.getElementById('btn-confirm-weights');
+    if (btn) {{ btn.disabled = true; btn.textContent = '書き込み中...'; }}
+    fetch('/confirm-weights', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify(w)
+    }})
+    .then(r => r.json())
+    .then(data => {{
+      if (btn) {{
+        btn.disabled = false;
+        btn.textContent = data.ok ? ('✅ ' + data.rows + '行更新') : ('❌ ' + (data.error || 'エラー'));
+        setTimeout(() => {{ if (btn) btn.textContent = 'このウェイトで確定'; }}, 3000);
+      }}
+    }})
+    .catch(err => {{
+      if (btn) {{
+        btn.disabled = false;
+        btn.textContent = '❌ 通信エラー';
+        setTimeout(() => {{ if (btn) btn.textContent = 'このウェイトで確定'; }}, 3000);
+      }}
+    }});
+  }};
+
   try {{
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {{
@@ -1281,6 +1333,87 @@ applyAllFilters();
 </html>'''
 
 
+# ---------- Flaskサーバー ----------
+
+def _recalc_technical_score(row: dict, w: dict) -> float:
+    sharp      = float(row.get('sharpness_score', 0) or 0)
+    expo       = float(row.get('exposure_score',  0) or 0)
+    eye_raw    = float(row.get('eye_score',       -1) or -1)
+    eye_val    = max(0.0, eye_raw)
+    n_persons  = int(float(row.get('person_count', 0) or 0))
+    is_first   = row.get('position', '') == 'first'
+    total = w['sharpness'] + w['exposure'] + w['eye'] + w['persons'] + w['first']
+    raw = (w['sharpness'] * sharp
+         + w['exposure']  * expo
+         + w['eye']       * eye_val
+         + w['persons']   * min(n_persons / 3.0, 1.0)
+         + w['first']     * (1.0 if is_first else 0.0))
+    return raw / total if total > 0 else 0.0
+
+
+def start_flask_server(jpeg_dir: Path, csv_path: Path,
+                       session_info: dict | None, port: int = 5002) -> None:
+    try:
+        from flask import Flask, request, jsonify, send_from_directory
+    except ImportError:
+        print('エラー: flask がインストールされていません。')
+        print('  pip install flask')
+        sys.exit(1)
+
+    app = Flask(__name__)
+    html_holder: dict = {'html': ''}
+
+    def _refresh_html() -> None:
+        rows = load_groups(csv_path)
+        html_holder['html'] = generate_html(
+            rows, jpeg_dir, session_info,
+            img_base='/img', server_mode=True,
+        )
+
+    _refresh_html()
+
+    @app.route('/')
+    def index():
+        return html_holder['html'], 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+    @app.route('/img/<path:filename>')
+    def serve_image(filename):
+        return send_from_directory(str(jpeg_dir), filename)
+
+    @app.route('/confirm-weights', methods=['POST'])
+    def confirm_weights():
+        try:
+            w = request.get_json(force=True)
+            required = {'sharpness', 'exposure', 'eye', 'persons', 'first'}
+            if not required.issubset(w.keys()):
+                return jsonify({'ok': False, 'error': 'missing weights'}), 400
+
+            with open(csv_path, newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or [])
+                all_rows = list(reader)
+
+            for row in all_rows:
+                row['technical_score'] = f'{_recalc_technical_score(row, w):.4f}'
+
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(all_rows)
+
+            _refresh_html()
+            return jsonify({'ok': True, 'rows': len(all_rows)})
+        except Exception as e:
+            return jsonify({'ok': False, 'error': str(e)}), 500
+
+    import webbrowser
+    url = f'http://localhost:{port}/'
+    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    print(f'\nFlaskサーバー起動: {url}')
+    print('終了するには Ctrl+C を押してください\n')
+    app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
+
+
 # ---------- メイン ----------
 
 def main() -> None:
@@ -1293,6 +1426,10 @@ def main() -> None:
     parser.add_argument('--output',       default='stage2_report.html')
     parser.add_argument('--session-json', default=None,
                         help='セッション情報JSONファイル (省略可)')
+    parser.add_argument('--serve', action='store_true',
+                        help='Flaskサーバーモードで起動（ウェイト確定ボタン有効）')
+    parser.add_argument('--port', type=int, default=5002,
+                        help='Flaskサーバーポート番号 (デフォルト: 5002)')
     args = parser.parse_args()
 
     jpeg_dir  = Path(args.jpeg_dir)
@@ -1311,6 +1448,10 @@ def main() -> None:
             sys.exit(1)
         with open(session_json_path, encoding='utf-8') as f:
             session_info = json.load(f)
+
+    if args.serve:
+        start_flask_server(jpeg_dir, csv_path, session_info, port=args.port)
+        return
 
     rows = load_groups(csv_path)
 
