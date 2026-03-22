@@ -539,7 +539,9 @@ def load_shots(
     detector: PersonDetector,
     verbose: bool,
     rejected_stems: set[str] | None = None,
+    demo: bool = False,
 ) -> list[Shot]:
+    import hashlib
     jpeg_files = sorted(
         list(jpeg_dir.glob('*.JPG')) + list(jpeg_dir.glob('*.jpg'))
     )
@@ -560,22 +562,38 @@ def load_shots(
             continue
         try:
             pil_img = Image.open(p)
-            dt  = _exif_datetime(pil_img)
-            ph  = _phash(pil_img)
+            dt = _exif_datetime(pil_img)
         except Exception as e:
             print(f'  (PIL失敗) {p.name}: {e}')
             continue
 
-        bgr = cv2.imread(str(p))
-        if bgr is None:
-            print(f'  (cv2読込失敗) {p.name}')
-            continue
+        if demo:
+            # 重い処理（pHash/MediaPipe/OpenCV）をスキップしてサンプル値を生成
+            h = int(hashlib.md5(p.name.encode()).hexdigest()[:8], 16)
+            ph         = imagehash.hex_to_hash('0' * 16)   # 全ショット同一 → 時刻のみでグループ化
+            hist       = np.zeros(48, dtype=np.float32)
+            n_persons  = 1 if (h % 3) > 0 else 0
+            eye_score  = round(0.5 + (h % 50) / 100, 2) if n_persons > 0 else None
+            sharp      = round(0.55 + (h % 40) / 100, 2)
+            exp_score  = round(0.65 + ((h >> 4) % 30) / 100, 2)
+            cam_rating = 0
+        else:
+            try:
+                ph = _phash(pil_img)
+            except Exception as e:
+                print(f'  (pHash失敗) {p.name}: {e}')
+                continue
 
-        hist = _lab_hist(bgr)
-        n_persons, eye_score, face_rects = detector.detect(bgr)
-        sharp = _sharpness_subject(bgr, face_rects)
-        exp_score = _exposure_score(bgr)
-        cam_rating = read_camera_rating(p)
+            bgr = cv2.imread(str(p))
+            if bgr is None:
+                print(f'  (cv2読込失敗) {p.name}')
+                continue
+
+            hist = _lab_hist(bgr)
+            n_persons, eye_score, face_rects = detector.detect(bgr)
+            sharp = _sharpness_subject(bgr, face_rects)
+            exp_score = _exposure_score(bgr)
+            cam_rating = read_camera_rating(p)
 
         shots.append(Shot(
             path=p, stem=p.stem, dt=dt, phash=ph,
@@ -614,6 +632,8 @@ def main() -> None:
     parser.add_argument('--enable-position-bonus', action='store_true',
                         help='first/last/soloにボーナス重みを付与（旧動作）')
     parser.add_argument('--verbose',               action='store_true')
+    parser.add_argument('--demo',                  action='store_true',
+                        help='デモモード: 重い画像解析（MediaPipe/OpenCV）をスキップしサンプルデータを生成する')
     args = parser.parse_args()
 
     jpeg_dir = Path(args.jpeg_dir)
@@ -641,10 +661,14 @@ def main() -> None:
           f'position_bonus: {args.enable_position_bonus}')
     print()
 
-    detector = PersonDetector()
+    if args.demo:
+        print('[デモモード] MediaPipe/OpenCV 解析をスキップします')
+        detector = None
+    else:
+        detector = PersonDetector()
 
     t_start = time.time()
-    shots = load_shots(jpeg_dir, detector, args.verbose, rejected_stems)
+    shots = load_shots(jpeg_dir, detector, args.verbose, rejected_stems, demo=args.demo)
     t_load = time.time() - t_start
     print(f'{len(shots)} ファイル読み込み完了 ({t_load:.1f}s / '
           f'{t_load / len(shots) * 100:.1f}s per 100枚)')

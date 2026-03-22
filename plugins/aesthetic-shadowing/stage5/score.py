@@ -454,6 +454,8 @@ def main() -> None:
         help="composite スコアの min-max 正規化を無効化（生クランプ値で star 変換）",
     )
     parser.add_argument("--verbose", action="store_true", help="全ファイルのスコアを表示")
+    parser.add_argument("--demo", action="store_true",
+                        help="デモモード: CLIPモデルのロードをスキップしサンプルスコアを生成する")
     args = parser.parse_args()
 
     # jpeg_dir: 位置引数優先、次に --jpeg-dir
@@ -478,6 +480,26 @@ def main() -> None:
     if len(weights) != 3:
         print("ERROR: --weights は 3 つの値が必要です (clip,high,low)", file=sys.stderr)
         sys.exit(1)
+
+    if args.demo:
+        import hashlib, time as _time
+        print("[Stage5] デモモード: CLIPモデルのロードをスキップします")
+        jpeg_files = sorted(
+            list(jpeg_dir.glob("*.JPG")) + list(jpeg_dir.glob("*.jpg"))
+        )
+        print(f"[Stage5] 対象: {len(jpeg_files)} ファイル")
+        results = []
+        for p in jpeg_files:
+            h = int(hashlib.md5(p.name.encode()).hexdigest()[:8], 16)
+            clip_s = round(0.30 + (h % 50) / 100, 4)
+            high_s = round(0.40 + ((h >> 4) % 40) / 100, 4)
+            low_s  = round(0.10 + ((h >> 8) % 30) / 100, 4)
+            comp   = round((clip_s * 0.5 + high_s * 0.3 + (1 - low_s) * 0.2), 4)
+            star   = sum(1 for t in thresholds if comp >= t)
+            results.append((p.name, clip_s, high_s, low_s, comp, star))
+            _time.sleep(0.005)
+        _write_csv_and_summary(output_path, results, len(results))
+        return
 
     # open-clip-torch を自動インストール（stage1/.venv の pip を使用）
     script_dir = Path(__file__).parent

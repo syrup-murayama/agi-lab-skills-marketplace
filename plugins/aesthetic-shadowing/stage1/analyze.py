@@ -74,6 +74,10 @@ def main() -> None:
         '--dry-run', action='store_true',
         help='XMPを書き出さず結果だけ表示する',
     )
+    parser.add_argument(
+        '--demo', action='store_true',
+        help='デモモード: 実際の画像解析をスキップしサンプルデータを生成する',
+    )
     args = parser.parse_args()
 
     jpeg_dir = Path(args.jpeg_dir)
@@ -99,6 +103,8 @@ def main() -> None:
     print(f'（フォーカス評価はStage2のtechnical_scoreに委ねる設計）')
     if args.dry_run:
         print('（ドライランモード: XMPは書き出しません）')
+    if args.demo:
+        print('（デモモード: 実際の画像解析をスキップします）')
     print()
 
     header = f'{"ファイル名":<28} {"白飛び%":>7} {"黒潰れ%":>7}  判定'
@@ -108,42 +114,58 @@ def main() -> None:
     results = []
     rejected_count = 0
 
-    for jpeg_path in jpeg_files:
-        img = cv2.imread(str(jpeg_path))
-        if img is None:
-            print(f'  (読込失敗) {jpeg_path.name}')
-            continue
+    if args.demo:
+        import hashlib, time as _time
+        for jpeg_path in jpeg_files:
+            h = int(hashlib.md5(jpeg_path.name.encode()).hexdigest()[:8], 16)
+            blown = (h % 80) / 1000          # 0.0〜8.0%
+            dark  = ((h >> 8) % 60) / 1000   # 0.0〜6.0%
+            print(f'{jpeg_path.name:<28} {blown:>6.1%} {dark:>6.1%}  OK')
+            results.append({
+                'file': jpeg_path.name,
+                'blown_pct': round(blown * 100, 2),
+                'dark_pct':  round(dark  * 100, 2),
+                'flags':     'OK',
+                'rejected':  False,
+            })
+            _time.sleep(0.005)
+    else:
+        for jpeg_path in jpeg_files:
+            img = cv2.imread(str(jpeg_path))
+            if img is None:
+                print(f'  (読込失敗) {jpeg_path.name}')
+                continue
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        blown_ratio, dark_ratio, is_blown, is_dark = analyze_exposure(
-            gray, args.blown_threshold, args.dark_threshold
-        )
+            blown_ratio, dark_ratio, is_blown, is_dark = analyze_exposure(
+                gray, args.blown_threshold, args.dark_threshold
+            )
 
-        flags = []
-        if is_blown:
-            flags.append('白飛び')
-        if is_dark:
-            flags.append('黒潰れ')
+            flags = []
+            if is_blown:
+                flags.append('白飛び')
+            if is_dark:
+                flags.append('黒潰れ')
 
-        is_rejected = bool(flags)
-        verdict = '  NG: ' + ' / '.join(flags) if is_rejected else '  OK'
+            is_rejected = bool(flags)
+            verdict = '  NG: ' + ' / '.join(flags) if is_rejected else '  OK'
 
-        print(f'{jpeg_path.name:<28} {blown_ratio:>6.1%} {dark_ratio:>6.1%}  {verdict}')
+            print(f'{jpeg_path.name:<28} {blown_ratio:>6.1%} {dark_ratio:>6.1%}  {verdict}')
 
-        if is_rejected:
-            rejected_count += 1
-            if not args.dry_run:
-                xmp_path = cr3_dir / (jpeg_path.stem + '.xmp')
-                write_rejection_xmp(xmp_path)
+            if is_rejected:
+                rejected_count += 1
+                if not args.dry_run:
+                    xmp_path = cr3_dir / (jpeg_path.stem + '.xmp')
+                    write_rejection_xmp(xmp_path)
 
-        results.append({
-            'file': jpeg_path.name,
-            'blown_pct': round(blown_ratio * 100, 2),
-            'dark_pct': round(dark_ratio * 100, 2),
-            'flags': ' / '.join(flags) if flags else 'OK',
-            'rejected': is_rejected,
-        })
+            results.append({
+                'file': jpeg_path.name,
+                'blown_pct': round(blown_ratio * 100, 2),
+                'dark_pct': round(dark_ratio * 100, 2),
+                'flags': ' / '.join(flags) if flags else 'OK',
+                'rejected': is_rejected,
+            })
 
     print('-' * 55)
     total = len(results)
