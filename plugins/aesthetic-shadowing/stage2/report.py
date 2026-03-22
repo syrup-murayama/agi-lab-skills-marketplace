@@ -763,7 +763,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
       <div class="n" style="color:{tech_avg_color}">{tech_avg:.2f}</div><div class="l">技術平均</div>
     </div>
     <div class="stat s-top10">
-      <div class="n">{n_top10}</div><div class="l">上位10%</div>
+      <div class="n" id="stat-top10">{n_top10}</div><div class="l">上位10%</div>
     </div>
   </div>
   <div class="header-filters">
@@ -1202,6 +1202,19 @@ function applyAllFilters() {{
         el.style.color = scoreColor(normalized);
       }}
     }});
+
+    // ヘッダーの「上位10%」カウントを動的更新
+    const allCards = Array.from(document.querySelectorAll('.card'));
+    if (allCards.length > 0) {{
+      const scores = allCards.map(c => parseFloat(c.dataset.computedScore || '0'));
+      scores.sort((a, b) => b - a);
+      const idx = Math.max(0, Math.floor(scores.length * 0.1) - 1);
+      const threshold = scores[idx] !== undefined ? scores[idx] : 0;
+      const count = scores.filter(s => s >= threshold).length;
+      const el = document.getElementById('stat-top10');
+      if (el) el.textContent = count;
+    }}
+
     applyAllFilters();
   }}
 
