@@ -101,8 +101,10 @@ def make_card(row: dict, jpeg_url: str, has_camera_rating: bool = False) -> str:
         elif near_rated:
             camera_rating_html = '<span class="cam-near">📷±</span>'
 
+    eye_val = f'{eye_score:.3f}' if eye_score is not None else '-1'
+
     return f'''<div class="card" tabindex="0" data-stem="{stem}" data-gid="{gid}" data-url="{jpeg_url}"
-  data-sharpness="{sharp:.3f}" data-exposure="{expo:.3f}"
+  data-sharpness="{sharp:.3f}" data-exposure="{expo:.3f}" data-eye="{eye_val}"
   data-persons="{n_persons}" data-position="{pos}"
   onclick="openModal('{jpeg_url}','{stem}',{gid})"
   onkeydown="cardKeydown(event,this)">
@@ -810,6 +812,10 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
         <input class="tuner-slider" id="w-exposure" type="range" min="0" max="1" step="0.05" value="0.40" oninput="onSlider('w-exposure','v-exposure')">
         <span class="tuner-val" id="v-exposure">0.40</span>
 
+        <span class="tuner-label">瞳ボーナス</span>
+        <input class="tuner-slider" id="w-eye" type="range" min="0" max="1" step="0.05" value="0.20" oninput="onSlider('w-eye','v-eye')">
+        <span class="tuner-val" id="v-eye">0.20</span>
+
         <span class="tuner-label">人物ボーナス</span>
         <input class="tuner-slider" id="w-persons" type="range" min="0" max="1" step="0.05" value="0.20" oninput="onSlider('w-persons','v-persons')">
         <span class="tuner-val" id="v-persons">0.20</span>
@@ -1154,7 +1160,7 @@ function applyAllFilters() {{
 
 // ---- スコアチューナー ----
 (function() {{
-  const DEFAULTS = {{ sharpness: 0.50, exposure: 0.40, persons: 0.20, first: 0.20 }};
+  const DEFAULTS = {{ sharpness: 0.50, exposure: 0.40, eye: 0.20, persons: 0.20, first: 0.20 }};
   const STORAGE_KEY = 'asa-weights-' + _FILENAME;
 
   function scoreColor(v) {{
@@ -1167,6 +1173,7 @@ function applyAllFilters() {{
     return {{
       sharpness: parseFloat(document.getElementById('w-sharpness').value),
       exposure:  parseFloat(document.getElementById('w-exposure').value),
+      eye:       parseFloat(document.getElementById('w-eye').value),
       persons:   parseFloat(document.getElementById('w-persons').value),
       first:     parseFloat(document.getElementById('w-first').value),
     }};
@@ -1174,14 +1181,17 @@ function applyAllFilters() {{
 
   function recompute() {{
     const w = getWeights();
-    const total = w.sharpness + w.exposure + w.persons + w.first;
+    const total = w.sharpness + w.exposure + w.eye + w.persons + w.first;
     document.querySelectorAll('.card').forEach(card => {{
       const sharp   = parseFloat(card.dataset.sharpness);
       const expo    = parseFloat(card.dataset.exposure);
+      const eyeRaw  = parseFloat(card.dataset.eye);
+      const eyeVal  = eyeRaw >= 0 ? eyeRaw : 0;   // -1 は顔なし → 0扱い
       const p       = parseInt(card.dataset.persons);
       const isFirst = card.dataset.position === 'first';
       const raw = w.sharpness * sharp
                 + w.exposure  * expo
+                + w.eye       * eyeVal
                 + w.persons   * Math.min(p / 3, 1.0)
                 + w.first     * (isFirst ? 1.0 : 0.0);
       const normalized = total > 0 ? raw / total : 0;
