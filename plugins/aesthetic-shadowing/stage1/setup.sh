@@ -14,6 +14,21 @@ pip install --upgrade pip -q
 pip install -r requirements.txt
 
 echo ""
+echo "=== ExifTool のインストール確認 ==="
+if command -v exiftool &>/dev/null; then
+    echo "✅ ExifTool はインストール済みです: $(exiftool --version)"
+else
+    echo "ExifTool が見つかりません。インストールします..."
+    if command -v brew &>/dev/null; then
+        brew install exiftool
+        echo "✅ ExifTool をインストールしました: $(exiftool --version)"
+    else
+        echo "⚠️  Homebrew が見つかりません。手動でインストールしてください:"
+        echo "    brew install exiftool"
+    fi
+fi
+
+echo ""
 echo ""
 echo "セットアップ完了。Stage 1〜6 に必要なすべての依存パッケージをインストールしました。"
 echo ""
