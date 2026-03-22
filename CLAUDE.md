@@ -6,21 +6,24 @@
 
 ## 設計の3原則
 1. **Human-in-the-Loop** — 最初から全自動にしない。人間の判断を学習ループに組み込む
-2. **Hybrid Processing** — Stage 1-2はローカル（Python/OpenCV）、Stage 3-4のみLLM。APIコスト最小化が最優先
+2. **Hybrid Processing** — Stage 1-2はローカル（Python/OpenCV）、Stage 4のみLLM（Claude）。APIコスト最小化が最優先
 3. **Contextual Heuristics** — 「撮影の初期衝動（最初の1枚）」「調整後の決定打（最後の1枚）」などの暗黙知をアルゴリズムに組む
 
-## 処理フロー（4ステージ）
+## 処理フロー（Stage 0〜6）
 | Stage | 処理場所 | 内容 |
 |-------|---------|------|
-| 1 | Local | ヒストグラム・ラプラシアン分散でピンボケ/白飛び/黒潰れを除外 |
-| 2 | Local | EXIFで連写グループ化 → 最初/最後の1枚にボーナス重み付け |
-| 3 | LLM | 代表カットのA/B判定をユーザーに提示 → フィードバックで審査基準を動的更新 |
-| 4 | LLM | 確定ルールで残り全カットをバッチ評価 → XMP Sidecar書き出し |
+| 0 | Claude | 撮影意図・フォルダパスのヒアリング |
+| 1 | Local (OpenCV) | 完全白飛び（80%以上）・黒潰れ（80%以上）のみ絶対除外（ピンボケ除外は廃止） |
+| 2 | Local (OpenCV + MediaPipe) | EXIFで連写グループ化 → 最初/最後の1枚にボーナス重み付け → HTMLダッシュボード生成 |
+| 3 | Local + ブラウザUI | 代表カット（最大50枚）を人間がレーティング → rated_samples.json 出力 |
+| 4 | Claude（ネイティブ） | レーティング結果から「審美眼プロファイル」を言語化 |
+| 5 | Local (CLIP) | プロファイルを使って全カットをバッチ採点（APIコストゼロ） |
+| 6 | Local (ExifTool) | 採点結果をLightroom用XMLに書き出し（JPEG直接/RAWサイドカー自動判別） |
 
 ## 技術スタック
-- ローカル: Python, OpenCV, Rawpy, ExifTool
-- LLM: Claude（マルチモーダル）/ Gemini 1.5 Pro
-- 出力: XMP Sidecarファイル（Lightroom連携）
+- ローカル: Python, OpenCV, Rawpy, ExifTool, imagehash, CLIP
+- LLM: Claude（マルチモーダル）
+- 出力: XMP Sidecarファイル / JPEG直接書き込み（Lightroom連携）
 - 場所: `plugins/aesthetic-shadowing/`（Claude Code Skills Marketplace プラグイン）
 
 ## 拡張（優先度低）

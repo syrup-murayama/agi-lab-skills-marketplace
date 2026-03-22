@@ -10,7 +10,20 @@
       "Bash(git commit *)",
       "Bash(git log *)",
       "Bash(git status)",
-      "Bash(git diff *)"
+      "Bash(git diff *)",
+      "Bash(git push *)",
+      "Bash(rsync *)",
+      "Bash(find * -name \"*.JPG\" *)",
+      "Bash(ls /Volumes/*)",
+      "Bash(open *)",
+      "Bash(python3 *)",
+      "Bash(cp *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(grep *)",
+      "Bash(wc *)",
+      "Bash(sleep *)"
     ],
     "deny": [
       "Bash(pip install *)",
