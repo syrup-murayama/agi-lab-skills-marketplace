@@ -32,7 +32,6 @@ from pathlib import Path
 
 import cv2
 import imagehash
-import mediapipe as mp
 import numpy as np
 from PIL import Image, ExifTags
 
@@ -175,13 +174,14 @@ def _exposure_score(bgr: np.ndarray) -> float:
 
 # ---- 人物検出 ----
 
+
 class PersonDetector:
     """
-    正面顔 → 横顔の順に Haar カスケードで人物を検出し、
-    0人 / 1人 / 複数人 の3分類で返す。
+    正面顔 → 横顔の順に Haar カスケードで person_count を推定し、
+    正面顔が検出された場合のみ Haar Cascade Eye で eye_score を返す。
 
-    上半身カスケードは複雑な背景で誤検知が多いため除外。
-    顔が検出されない場合は「0人」とみなす（後段 Step B で補完予定）。
+    person_count: Haar Cascade ベース（0人 / 1人 / 複数人）
+    eye_score:    顔なし=None、両目検出=1.0、片目=0.5、目なし=0.0
     """
 
     def __init__(self) -> None:
@@ -194,35 +194,37 @@ class PersonDetector:
         return self.count_and_eye_score(bgr)[0]
 
     def count_and_eye_score(self, bgr: np.ndarray) -> tuple[int, float | None]:
-        """顔数と eye_score (顔なし=None、顔あり=目開き率) を返す。"""
+        """顔数と eye_score (顔なし=None、両目=1.0、片目=0.5、目なし=0.0) を返す。"""
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         cv2.equalizeHist(gray, gray)
 
         frontal = self._frontal.detectMultiScale(
             gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
         )
-        faces = frontal if not isinstance(frontal, tuple) else []
-        n_faces = len(faces)
+        n_faces = len(frontal) if not isinstance(frontal, tuple) else 0
 
         if n_faces == 0:
-            # 横顔（正面で見つからない場合のみ）— 横顔は目検出しない
+            # 横顔（正面で見つからない場合のみ）— 横顔は eye_score なし
             profile = self._profile.detectMultiScale(
                 gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
             )
             n_profile = len(profile) if not isinstance(profile, tuple) else 0
             return n_profile, None
 
-        # 正面顔ごとに目を検出
-        eyes_found = 0
-        for (fx, fy, fw, fh) in faces:
-            face_roi = gray[fy:fy + fh, fx:fx + fw]
-            eyes = self._eye.detectMultiScale(
-                face_roi, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20)
-            )
-            if not isinstance(eyes, tuple) and len(eyes) >= 1:
-                eyes_found += 1
+        # 正面顔の各 ROI で目を検出し、スコアを平均する
+        eye_scores = []
+        for (fx, fy, fw, fh) in frontal:
+            roi = gray[fy:fy + fh, fx:fx + fw]
+            eyes = self._eye.detectMultiScale(roi, scaleFactor=1.1, minNeighbors=5)
+            n_eyes = len(eyes) if not isinstance(eyes, tuple) else 0
+            if n_eyes >= 2:
+                eye_scores.append(1.0)
+            elif n_eyes == 1:
+                eye_scores.append(0.5)
+            else:
+                eye_scores.append(0.0)
 
-        return n_faces, eyes_found / n_faces
+        return n_faces, sum(eye_scores) / len(eye_scores)
 
 
 # ---- グルーピング ----
