@@ -183,12 +183,16 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage2/report.py \
   <jpeg_dir> \
-  --groups-csv $OUTPUT_DIR/stage2_groups.csv
+  --groups-csv $OUTPUT_DIR/stage2_groups.csv \
+  --serve
 ```
 
 ダッシュボードが起動したら、ユーザーにこう伝える:
 > 「ダッシュボードが開きました。写真を確認してレーティングしてください。
+> セレクトが終わったら『📤 XMPに書き出す』ボタンをクリックすると Lightroom 用に書き出されます。
 > 時間がない場合は『おまかせモード』でAIに選ばせることもできます。どうしますか？」
+
+> **注意:** `--serve` モードはプロセスが起動し続けます。書き出し完了後に `Ctrl+C` で終了してください。
 
 ---
 
