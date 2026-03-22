@@ -214,6 +214,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     )
     server_mode_js = 'true' if server_mode else 'false'
     confirm_btn_display = '' if server_mode else 'display:none'
+    export_btn_display = '' if server_mode else 'display:none'
 
     return f'''<!DOCTYPE html>
 <html lang="ja">
@@ -761,6 +762,25 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     flex-shrink: 0;
   }}
 
+  /* 書き出しボタン */
+  .export-btn {{
+    display: block;
+    width: 100%;
+    margin-top: 10px;
+    padding: 7px 12px;
+    border-radius: 8px;
+    border: 1px solid #1e4d3a;
+    background: transparent;
+    color: #22c55e;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+  }}
+  .export-btn:hover {{ border-color: #22c55e; background: #0d2a1f; }}
+  .export-btn:disabled {{ opacity: 0.5; cursor: default; }}
+
   @media (max-width: 899px) {{
     .sidebar {{ width: 260px; }}
   }}
@@ -820,6 +840,10 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
           <span class="sel-sum-sublabel">未選択</span>
         </div>
       </div>
+      <button class="export-btn" id="btn-export-selections"
+              onclick="exportSelections()" style="{export_btn_display}">
+        📤 XMPに書き出す
+      </button>
     </div>
 
     <div class="tuner-panel">
@@ -1303,6 +1327,41 @@ function applyAllFilters() {{
   recompute();
 }})();
 
+// ---- XMP書き出し ----
+window.exportSelections = function() {{
+  if (!_SERVER_MODE) return;
+  const btn = document.getElementById('btn-export-selections');
+  if (btn) {{ btn.disabled = true; btn.textContent = '書き出し中...'; }}
+  fetch('/export-selections', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{ selections: selectState, excludes: excludeState }})
+  }})
+  .then(r => r.json())
+  .then(data => {{
+    if (btn) {{
+      btn.disabled = false;
+      if (data.ok) {{
+        let msg = `✅ ${{data.written}}件書き出し完了`;
+        if (data.errors && data.errors.length > 0) {{
+          msg += ` (エラー${{data.errors.length}}件)`;
+        }}
+        btn.textContent = msg;
+      }} else {{
+        btn.textContent = '❌ ' + (data.error || 'エラー');
+      }}
+      setTimeout(() => {{ if (btn) btn.textContent = '📤 XMPに書き出す'; }}, 4000);
+    }}
+  }})
+  .catch(() => {{
+    if (btn) {{
+      btn.disabled = false;
+      btn.textContent = '❌ 通信エラー';
+      setTimeout(() => {{ if (btn) btn.textContent = '📤 XMPに書き出す'; }}, 4000);
+    }}
+  }});
+}};
+
 // ---- セッションメモ localStorage 自動保存 ----
 (function() {{
   const textarea = document.getElementById('session-note');
@@ -1351,6 +1410,16 @@ def _recalc_technical_score(row: dict, w: dict) -> float:
     return raw / total if total > 0 else 0.0
 
 
+def _find_image(jpeg_dir: Path, stem: str) -> Path | None:
+    """stem (拡張子なしファイル名) から実際の画像パスを返す。見つからなければ None。"""
+    for ext in ('.JPG', '.jpg', '.jpeg', '.JPEG', '.CR3', '.cr3', '.ARW', '.arw',
+                '.NEF', '.nef', '.RAF', '.raf'):
+        p = jpeg_dir / (stem + ext)
+        if p.exists():
+            return p
+    return None
+
+
 def start_flask_server(jpeg_dir: Path, csv_path: Path,
                        session_info: dict | None, port: int = 5002) -> None:
     try:
@@ -1359,6 +1428,15 @@ def start_flask_server(jpeg_dir: Path, csv_path: Path,
         print('エラー: flask がインストールされていません。')
         print('  pip install flask')
         sys.exit(1)
+
+    # xmp_writer を stage6/ からインポート
+    _stage6_dir = str(Path(__file__).parent.parent / 'stage6')
+    if _stage6_dir not in sys.path:
+        sys.path.insert(0, _stage6_dir)
+    try:
+        from xmp_writer import update_metadata as _update_metadata
+    except ImportError:
+        _update_metadata = None
 
     app = Flask(__name__)
     html_holder: dict = {'html': ''}
@@ -1403,6 +1481,48 @@ def start_flask_server(jpeg_dir: Path, csv_path: Path,
 
             _refresh_html()
             return jsonify({'ok': True, 'rows': len(all_rows)})
+        except Exception as e:
+            return jsonify({'ok': False, 'error': str(e)}), 500
+
+    @app.route('/export-selections', methods=['POST'])
+    def export_selections():
+        if _update_metadata is None:
+            return jsonify({'ok': False, 'error': 'xmp_writer が見つかりません (stage6/xmp_writer.py)'}), 500
+        try:
+            data = request.get_json(force=True)
+            selections = data.get('selections', {})  # stem -> 'good'|'fine'|'keep'
+            excludes   = data.get('excludes',   {})  # stem -> true
+
+            RATING_MAP = {'good': 3, 'fine': 2, 'keep': 1}
+
+            written = 0
+            errors: list[str] = []
+
+            for stem, grade in selections.items():
+                star = RATING_MAP.get(grade, 1)
+                img = _find_image(jpeg_dir, stem)
+                if img is None:
+                    errors.append(f'{stem} (not found)')
+                    continue
+                result = _update_metadata(img, star)
+                if result == 'error':
+                    errors.append(stem)
+                else:
+                    written += 1
+
+            for stem in excludes:
+                if excludes[stem]:
+                    img = _find_image(jpeg_dir, stem)
+                    if img is None:
+                        errors.append(f'{stem} (not found)')
+                        continue
+                    result = _update_metadata(img, -1)
+                    if result == 'error':
+                        errors.append(stem)
+                    else:
+                        written += 1
+
+            return jsonify({'ok': True, 'written': written, 'errors': errors})
         except Exception as e:
             return jsonify({'ok': False, 'error': str(e)}), 500
 
