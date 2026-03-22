@@ -1,6 +1,6 @@
 {
   "name": "aesthetic-shadowing",
-  "display_name": "Aesthetic Shadowing",
+  "display_name": "SSS / 写真選別支援エージェント",
   "description": "フォトグラファーの審美眼を30枚の判断から学習し、数千枚を自律的にセレクトするAIエージェント。Stage1〜6のフルパイプライン実装済み。",
   "version": "0.1.0",
   "author": {
