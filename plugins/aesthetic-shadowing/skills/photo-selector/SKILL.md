@@ -76,12 +76,15 @@ find /Volumes/ -maxdepth 3 -name "DCIM" -type d 2>/dev/null
 **jpeg_dir = コピー先パス**（以降のすべてのステップで使う）
 **OUTPUT_DIR** = `jpeg_dir` の親ディレクトリ（ユーザーが別途指定した場合はそちらを優先）
 
-#### 3. rsync でコピー開始（バックグラウンド）
+#### 3. 撮影日のファイルのみ抽出してコピー（バックグラウンド）
+
+**重要: `-newermt "yyyy-mm-dd"` は「その日の00:00:00より新しい」ため、前日のファイルも含んでしまう。必ず `"yyyy-mm-dd 00:00:00"` と時刻を明示すること。**
 
 ```bash
-rsync -av --progress \
-  /Volumes/<SDカードボリューム>/DCIM/ \
-  ~/Downloads/yyyy-mm-dd_JPEG/
+# 例: 2026-03-20 のみコピー
+find /Volumes/<SDカードボリューム>/DCIM/ -name "*.JPG" \
+  -newermt "2026-03-20 00:00:00" ! -newermt "2026-03-21 00:00:00" \
+  -exec rsync -a {} ~/Downloads/2026-03-20_JPEG/ \;
 ```
 
 このコマンドを **バックグラウンドで開始**し、コピー中に Step 0-B を並行して進める。
