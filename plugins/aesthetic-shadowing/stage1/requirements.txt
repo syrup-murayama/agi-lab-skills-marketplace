@@ -2,3 +2,4 @@ opencv-python
 numpy
 anthropic
 open-clip-torch
+mediapipe

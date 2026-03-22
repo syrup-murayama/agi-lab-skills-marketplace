@@ -32,6 +32,7 @@ from pathlib import Path
 
 import cv2
 import imagehash
+import mediapipe as mp
 import numpy as np
 from PIL import Image, ExifTags
 

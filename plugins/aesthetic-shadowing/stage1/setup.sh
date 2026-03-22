@@ -29,10 +29,15 @@ else
 fi
 
 echo ""
+echo "=== CLIP モデルのプリロード ==="
+echo "CLIPモデルをプリロードしています（初回のみ約340MBのダウンロードが発生します）..."
+.venv/bin/python -c "import open_clip; open_clip.create_model_and_transforms('ViT-B-32', pretrained='openai')" && echo "✅ CLIPプリロード完了" || echo "⚠️  CLIPプリロードに失敗しました（Stage 5 の初回実行時にダウンロードされます）"
+
+echo ""
 echo ""
 echo "セットアップ完了。Stage 1〜6 に必要なすべての依存パッケージをインストールしました。"
 echo ""
-echo "  インストール済み: opencv-python, numpy, anthropic, open-clip-torch"
+echo "  インストール済み: opencv-python, numpy, anthropic, open-clip-torch, mediapipe"
 echo "  ※ open-clip-torch の初回実行時に約340MBのモデルが自動ダウンロードされます。"
 echo ""
 echo "実行例:"
