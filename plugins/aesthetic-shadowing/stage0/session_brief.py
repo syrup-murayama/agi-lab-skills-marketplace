@@ -115,6 +115,7 @@ def main() -> None:
     )
     parser.add_argument("--output", default="session.json", help="出力JSONファイルパス")
     parser.add_argument("--session-name", help="セッション名（省略時はインタラクティブ入力）")
+    parser.add_argument("--intent", help="撮影意図（指定時はインタラクティブ入力をスキップ）")
     args = parser.parse_args()
 
     print("=== Aesthetic Shadowing Agent - Stage 0: セッション初期化 ===")
@@ -132,7 +133,10 @@ def main() -> None:
     print()
 
     # 撮影意図
-    intent_raw = read_multiline_intent()
+    if args.intent:
+        intent_raw = args.intent
+    else:
+        intent_raw = read_multiline_intent()
     if not intent_raw.strip():
         print("エラー: 撮影意図は必須です。", file=sys.stderr)
         sys.exit(1)

@@ -2,3 +2,7 @@ opencv-python
 numpy
 anthropic
 open-clip-torch
+imagehash
+Pillow
+flask
+python-dotenv

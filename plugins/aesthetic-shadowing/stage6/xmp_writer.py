@@ -98,7 +98,7 @@ def load_camera_ratings(groups_csv: Path) -> dict:
     with open(groups_csv, encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            filename = row.get("filename", "")
+            filename = row.get("file", "")
             try:
                 cr = int(row.get("camera_rating", 0) or 0)
             except ValueError:
@@ -132,7 +132,7 @@ def run(scores_path: Path, image_dir: Path, groups_csv: Path | None = None) -> N
     print(f"[Stage6] {total} 件のメタデータを更新します (dir: {image_dir})")
 
     for i, row in enumerate(rows, 1):
-        filename = row.get("filename", "")
+        filename = row.get("file", "")
         try:
             star_rating = int(row.get("star_rating", 0))
         except ValueError:

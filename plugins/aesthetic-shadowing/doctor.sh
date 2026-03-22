@@ -69,7 +69,7 @@ if [ -f "$VENV/bin/python" ]; then
     echo ""
     echo "--- Pythonパッケージチェック ($VENV_PYTHON) ---"
 
-    for pkg in cv2 torch clip; do
+    for pkg in cv2 torch open_clip imagehash PIL flask; do
         if "$VENV_PYTHON" -c "import $pkg" 2>/dev/null; then
             VERSION=$("$VENV_PYTHON" -c "import $pkg; v = getattr($pkg, '__version__', None) or getattr($pkg, 'version', '?'); print(v)" 2>/dev/null || echo "?")
             echo "✅ import $pkg ($VERSION)"

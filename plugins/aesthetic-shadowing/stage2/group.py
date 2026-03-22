@@ -30,10 +30,14 @@ from datetime import datetime
 from itertools import groupby
 from pathlib import Path
 
-import cv2
-import imagehash
-import numpy as np
-from PIL import Image, ExifTags
+try:
+    import cv2
+    import imagehash
+    import numpy as np
+    from PIL import Image, ExifTags
+except ImportError:
+    print("エラー: 必要なパッケージが見つかりません。doctor.sh を実行して環境を確認してください", file=sys.stderr)
+    sys.exit(1)
 
 # ---- 定数 ----
 DEFAULT_TIME_GAP_SEC   = 30    # この秒数を超えたら別シーン候補
