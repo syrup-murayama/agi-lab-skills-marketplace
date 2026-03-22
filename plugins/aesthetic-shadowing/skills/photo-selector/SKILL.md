@@ -55,7 +55,7 @@ Apple Silicon Mac の場合は MPS が自動で有効になり高速動作する
 
 #### 1. SDカードの自動検出
 
-`/Volumes/` 配下でマウント済みのボリュームを確認し、EOS R6 Mark III の DCIM フォルダを含むものを特定する:
+`/Volumes/` 配下でマウント済みのボリュームを確認し、DCIM フォルダを含むものを特定する:
 
 ```bash
 ls /Volumes/
@@ -63,6 +63,29 @@ find /Volumes/ -maxdepth 3 -name "DCIM" -type d 2>/dev/null
 ```
 
 複数ヒットした場合はユーザーに選択を求める。
+
+#### 1-B. カメラ機種の判定
+
+DCIM フォルダのサブディレクトリ名でカメラ機種を判定する:
+
+| サブディレクトリ名 | カメラ | 保存形式 |
+|---|---|---|
+| `100EOS_R` など（EOS系） | EOS R6 Mark III | CFカード=RAW / SDカード=JPEG のみ |
+| `100MSDCF` など（MSDCFはSony系） | Sony A7S など | RAW + JPEG 混在 |
+
+```bash
+ls /Volumes/<ボリューム名>/DCIM/
+```
+
+**Sony A7S（`100MSDCF` など）を検出した場合:**
+
+ユーザーに確認する:
+
+> 「Sony のSDカードが検出されました（`/Volumes/Untitled/DCIM/100MSDCF`）。
+> RAW + JPEG が混在しています。JPEGのみコピーしてセレクトを進めますか？」
+
+- 「はい」→ JPEG（`*.JPG`）のみコピー（以降の手順と同じ）
+- 「いいえ」→ ユーザーの指示を待つ
 
 #### 2. 撮影日の確認
 
@@ -81,7 +104,7 @@ find /Volumes/ -maxdepth 3 -name "DCIM" -type d 2>/dev/null
 **重要: `-newermt "yyyy-mm-dd"` は「その日の00:00:00より新しい」ため、前日のファイルも含んでしまう。必ず `"yyyy-mm-dd 00:00:00"` と時刻を明示すること。**
 
 ```bash
-# 例: 2026-03-20 のみコピー
+# 例: 2026-03-20 のみコピー（JPEG のみ）
 find /Volumes/<SDカードボリューム>/DCIM/ -name "*.JPG" \
   -newermt "2026-03-20 00:00:00" ! -newermt "2026-03-21 00:00:00" \
   -exec rsync -a {} ~/Downloads/2026-03-20_JPEG/ \;
