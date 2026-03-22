@@ -7,7 +7,7 @@ Stage 2 Step A: シーングルーピング + 技術スコアリング
   2. 30秒ウィンドウで「シーン候補」を一次グループ化
   3. グループ内で pHash + L*a*b*ヒストグラム相関により
      「見た目が変わった」と判断したら分割
-  4. 正面顔 / 横顔の Haar カスケードで人物数を推定
+  4. MediaPipe FaceLandmarker で人物数 + 瞳開き度 (EAR) を推定
   5. 各カットに position（first / last / middle / solo）を付与
      （--enable-position-bonus で旧来のボーナス重みを有効化可能）
   6. 技術スコアを算出（sharpness / exposure / technical）
@@ -48,9 +48,10 @@ BONUS_LAST     = 1.3
 BONUS_SOLO     = 1.5
 WEIGHT_MIDDLE  = 1.0
 
-# 技術スコアの重み
-WEIGHT_SHARPNESS = 0.6
-WEIGHT_EXPOSURE  = 0.4
+# 技術スコアの重み（eye_score なしの場合は sharpness+exposure で正規化）
+WEIGHT_SHARPNESS = 0.55
+WEIGHT_EXPOSURE  = 0.35
+WEIGHT_EYE       = 0.10  # 瞳ボーナス（eye_score=None の場合は残り重みで正規化）
 
 # リサイズ基準（速度優先）
 ANALYSIS_SHORT_SIDE = 512
@@ -152,6 +153,45 @@ def _sharpness_raw(bgr: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def _sharpness_subject(bgr: np.ndarray, face_rects: list[tuple[int,int,int,int]]) -> float:
+    """
+    被写体（顔ROI）優先のシャープネスを返す。
+
+    - 顔ROIなし: 全体スコアをそのまま返す
+    - 顔ROIあり:
+        * 顔ROIシャープネス × 0.9 + 全体 × 0.1
+        * 背景が被写体の2倍以上鮮明 → フォーカスが背景に移っている可能性あり
+          → 顔スコアをさらに 0.6 倍にペナルティ（背景ボケとしてみなす）
+    """
+    whole = _sharpness_raw(bgr)
+    if not face_rects:
+        return whole
+
+    gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    roi_scores = []
+    for (x1, y1, x2, y2) in face_rects:
+        roi = gray_full[y1:y2, x1:x2]
+        if roi.size == 0:
+            continue
+        if min(roi.shape[:2]) < 32:
+            roi = cv2.resize(roi, (64, 64))
+        roi_scores.append(float(cv2.Laplacian(roi, cv2.CV_64F).var()))
+
+    if not roi_scores:
+        return whole
+
+    subject_sharp = sum(roi_scores) / len(roi_scores)
+
+    # 背景が被写体より2倍以上鮮明 → フォーカスが背景に移っている
+    # 例: 竹の壁・草木など高コントラスト背景で被写体がボケているケース
+    focus_penalty = 1.0
+    if subject_sharp > 0 and whole / subject_sharp > 2.0:
+        focus_penalty = 0.6
+
+    return subject_sharp * 0.9 * focus_penalty + whole * 0.1
+
+
 def _exposure_score(bgr: np.ndarray) -> float:
     """
     白飛び・黒潰れ率からスコアを計算。
@@ -174,57 +214,148 @@ def _exposure_score(bgr: np.ndarray) -> float:
 
 # ---- 人物検出 ----
 
+# FaceLandmarker 用目ランドマーク (478点モデル)
+_LEFT_EYE_IDX  = [362, 385, 387, 263, 373, 380]
+_RIGHT_EYE_IDX = [33,  160, 158, 133, 153, 144]
+_EAR_OPEN_THRESHOLD = 0.18   # EAR がこの値以上なら「目が開いている」
+
+# モデルファイルパス（同ディレクトリに配置）
+_STAGE2_DIR = Path(__file__).parent
+_LANDMARKER_MODEL = _STAGE2_DIR / 'face_landmarker.task'
+_DETECTOR_MODEL   = _STAGE2_DIR / 'blaze_face.tflite'
+
+
+def _ear(landmarks, indices: list[int]) -> float:
+    """Eye Aspect Ratio (EAR) を計算する。"""
+    pts = [(landmarks[i].x, landmarks[i].y) for i in indices]
+
+    def d(a: tuple, b: tuple) -> float:
+        return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+    vert = (d(pts[1], pts[5]) + d(pts[2], pts[4])) / 2.0
+    horiz = d(pts[0], pts[3])
+    return vert / horiz if horiz > 1e-6 else 0.0
+
+
+def _eye_sep_score(detection, img_w: int) -> float:
+    """
+    BlazeFace keypoints から目の間隔比で顔向きを推定するフォールバック。
+    eye_sep / face_width が大きいほど正面顔 → 高スコア。
+    keypoints: [right_eye, left_eye, nose, mouth, right_ear, left_ear]  (正規化座標)
+    """
+    kpts = detection.keypoints
+    if len(kpts) < 2:
+        return 0.0
+    re = kpts[0]  # right eye (x, y 正規化)
+    le = kpts[1]  # left eye
+    sep = ((le.x - re.x) ** 2 + (le.y - re.y) ** 2) ** 0.5
+    bb = detection.bounding_box
+    face_w_norm = bb.width / img_w if img_w > 0 else 1.0
+    ratio = sep / face_w_norm if face_w_norm > 0 else 0.0
+    if ratio >= 0.35:
+        return 1.0    # 両目がはっきり離れている → 正面
+    elif ratio >= 0.18:
+        return 0.5    # 斜め顔
+    else:
+        return 0.2    # 横顔 / 俯き
+
 
 class PersonDetector:
     """
-    正面顔 → 横顔の順に Haar カスケードで person_count を推定し、
-    正面顔が検出された場合のみ Haar Cascade Eye で eye_score を返す。
+    2段階 MediaPipe 検出:
+      Stage1: BlazeFace (FaceDetector) で顔BB + eye keypoints を取得
+      Stage2: 顔BB切り出し → FaceLandmarker で EAR 計算（失敗時は keypoint比率でフォールバック）
 
-    person_count: Haar Cascade ベース（0人 / 1人 / 複数人）
-    eye_score:    顔なし=None、両目検出=1.0、片目=0.5、目なし=0.0
+    person_count: 検出された顔の数
+    eye_score:    顔なし=None
+                  両目開き(EAR/正面)=1.0, 片目/斜め=0.5, 俯き/横顔=0.2, 閉眼=0.0
     """
 
     def __init__(self) -> None:
-        base = cv2.data.haarcascades
-        self._frontal = cv2.CascadeClassifier(base + 'haarcascade_frontalface_default.xml')
-        self._profile = cv2.CascadeClassifier(base + 'haarcascade_profileface.xml')
-        self._eye     = cv2.CascadeClassifier(base + 'haarcascade_eye.xml')
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_tasks
+        from mediapipe.tasks.python import vision as mp_vision
 
-    def count(self, bgr: np.ndarray) -> int:
-        return self.count_and_eye_score(bgr)[0]
+        for path, label in [(_DETECTOR_MODEL, 'BlazeFace'), (_LANDMARKER_MODEL, 'FaceLandmarker')]:
+            if not path.exists():
+                raise FileNotFoundError(
+                    f'{label} モデルが見つかりません: {path}\n'
+                    'setup.sh を実行してモデルをダウンロードしてください。'
+                )
+
+        det_opts = mp_vision.FaceDetectorOptions(
+            base_options=mp_tasks.BaseOptions(model_asset_path=str(_DETECTOR_MODEL)),
+            min_detection_confidence=0.2,
+        )
+        self._detector = mp_vision.FaceDetector.create_from_options(det_opts)
+
+        lm_opts = mp_vision.FaceLandmarkerOptions(
+            base_options=mp_tasks.BaseOptions(model_asset_path=str(_LANDMARKER_MODEL)),
+            num_faces=1,
+            min_face_detection_confidence=0.1,
+            min_face_presence_confidence=0.1,
+            min_tracking_confidence=0.1,
+        )
+        self._landmarker = mp_vision.FaceLandmarker.create_from_options(lm_opts)
+        self._mp = mp
+
+    def detect(self, bgr: np.ndarray) -> tuple[int, float | None, list[tuple[int,int,int,int]]]:
+        """
+        顔数・eye_score・顔BB一覧を返す。
+        face_rects: [(x1, y1, x2, y2), ...] ピクセル座標
+        """
+        mp = self._mp
+        h, w = bgr.shape[:2]
+        rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+        det_result = self._detector.detect(mp_img)
+        n_faces = len(det_result.detections)
+        if n_faces == 0:
+            return 0, None, []
+
+        scores = []
+        face_rects = []
+        for det in det_result.detections:
+            bb = det.bounding_box
+            # 顔BBをパディングなしで記録（シャープネス計算用）
+            fx1 = max(0, bb.origin_x)
+            fy1 = max(0, bb.origin_y)
+            fx2 = min(w, bb.origin_x + bb.width)
+            fy2 = min(h, bb.origin_y + bb.height)
+            face_rects.append((fx1, fy1, fx2, fy2))
+
+            # FaceLandmarker 用にパディングありでクロップ
+            pad = int(max(bb.width, bb.height) * 0.4)
+            x1 = max(0, bb.origin_x - pad)
+            y1 = max(0, bb.origin_y - pad)
+            x2 = min(w, bb.origin_x + bb.width + pad)
+            y2 = min(h, bb.origin_y + bb.height + pad)
+            crop = np.ascontiguousarray(rgb[y1:y2, x1:x2])
+            mp_crop = mp.Image(image_format=mp.ImageFormat.SRGB, data=crop)
+            lm_result = self._landmarker.detect(mp_crop)
+
+            if lm_result.face_landmarks:
+                lms = lm_result.face_landmarks[0]
+                l_ear = _ear(lms, _LEFT_EYE_IDX)
+                r_ear = _ear(lms, _RIGHT_EYE_IDX)
+                l_open = l_ear >= _EAR_OPEN_THRESHOLD
+                r_open = r_ear >= _EAR_OPEN_THRESHOLD
+                if l_open and r_open:
+                    scores.append(1.0)
+                elif l_open or r_open:
+                    scores.append(0.5)
+                else:
+                    scores.append(0.0)
+            else:
+                scores.append(_eye_sep_score(det, w))
+
+        return n_faces, sum(scores) / len(scores), face_rects
 
     def count_and_eye_score(self, bgr: np.ndarray) -> tuple[int, float | None]:
-        """顔数と eye_score (顔なし=None、両目=1.0、片目=0.5、目なし=0.0) を返す。"""
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        cv2.equalizeHist(gray, gray)
-
-        frontal = self._frontal.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        )
-        n_faces = len(frontal) if not isinstance(frontal, tuple) else 0
-
-        if n_faces == 0:
-            # 横顔（正面で見つからない場合のみ）— 横顔は eye_score なし
-            profile = self._profile.detectMultiScale(
-                gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-            )
-            n_profile = len(profile) if not isinstance(profile, tuple) else 0
-            return n_profile, None
-
-        # 正面顔の各 ROI で目を検出し、スコアを平均する
-        eye_scores = []
-        for (fx, fy, fw, fh) in frontal:
-            roi = gray[fy:fy + fh, fx:fx + fw]
-            eyes = self._eye.detectMultiScale(roi, scaleFactor=1.1, minNeighbors=5)
-            n_eyes = len(eyes) if not isinstance(eyes, tuple) else 0
-            if n_eyes >= 2:
-                eye_scores.append(1.0)
-            elif n_eyes == 1:
-                eye_scores.append(0.5)
-            else:
-                eye_scores.append(0.0)
-
-        return n_faces, sum(eye_scores) / len(eye_scores)
+        """後方互換用ラッパー。"""
+        n, eye, _ = self.detect(bgr)
+        return n, eye
 
 
 # ---- グルーピング ----
@@ -360,10 +491,20 @@ def compute_technical_scores(shots: list[Shot]) -> None:
         max_sharp = max(m.sharpness_raw for m in members)
         for m in members:
             m.sharpness_score = m.sharpness_raw / max_sharp if max_sharp > 0 else 0.0
-            m.technical_score = (
-                m.sharpness_score * WEIGHT_SHARPNESS
-                + m.exposure_score * WEIGHT_EXPOSURE
-            )
+            if m.eye_score is not None:
+                # 瞳スコアあり: 3因子で計算
+                m.technical_score = (
+                    m.sharpness_score * WEIGHT_SHARPNESS
+                    + m.exposure_score * WEIGHT_EXPOSURE
+                    + m.eye_score      * WEIGHT_EYE
+                )
+            else:
+                # 人物なし / 検出失敗: sharpness+exposure のみ（重みを正規化）
+                w_total = WEIGHT_SHARPNESS + WEIGHT_EXPOSURE
+                m.technical_score = (
+                    m.sharpness_score * WEIGHT_SHARPNESS / w_total
+                    + m.exposure_score * WEIGHT_EXPOSURE  / w_total
+                )
 
 
 def assign_near_rated(shots: list[Shot]) -> None:
@@ -431,8 +572,8 @@ def load_shots(
             continue
 
         hist = _lab_hist(bgr)
-        n_persons, eye_score = detector.count_and_eye_score(bgr)
-        sharp = _sharpness_raw(bgr)
+        n_persons, eye_score, face_rects = detector.detect(bgr)
+        sharp = _sharpness_subject(bgr, face_rects)
         exp_score = _exposure_score(bgr)
         cam_rating = read_camera_rating(p)
 
