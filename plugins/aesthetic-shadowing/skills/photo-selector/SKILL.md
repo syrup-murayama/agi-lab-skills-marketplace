@@ -49,13 +49,11 @@ Apple Silicon Mac の場合は MPS が自動で有効になり高速動作する
 
 ## 実行フロー
 
-### Step 0-A: SDカード検出・コピー
+### Step 0: SDカード検出・情報収集・コピー
 
-**重要: SDカードを直接参照してパイプラインを実行してはならない。必ずローカルにコピーしてから実行する。**
+> **絶対ルール: SDカードを直接参照してパイプラインを実行してはならない。`jpeg_dir` は必ずローカルパスにする。`/Volumes/...` をそのまま Step 1 以降に渡すことは禁止。**
 
-#### 1. SDカードの自動検出
-
-`/Volumes/` 配下でマウント済みのボリュームを確認し、DCIM フォルダを含むものを特定する:
+#### 0-1. SDカードの自動検出
 
 ```bash
 ls /Volumes/
@@ -64,22 +62,20 @@ find /Volumes/ -maxdepth 3 -name "DCIM" -type d 2>/dev/null
 
 複数ヒットした場合はユーザーに選択を求める。
 
-#### 1-B. カメラ機種の判定
+#### 0-2. カメラ機種の判定
 
 DCIM フォルダのサブディレクトリ名でカメラ機種を判定する:
+
+```bash
+ls /Volumes/<ボリューム名>/DCIM/
+```
 
 | サブディレクトリ名 | カメラ | 保存形式 |
 |---|---|---|
 | `100EOS_R` など（EOS系） | EOS R6 Mark III | CFカード=RAW / SDカード=JPEG のみ |
 | `100MSDCF` など（MSDCFはSony系） | Sony A7S など | RAW + JPEG 混在 |
 
-```bash
-ls /Volumes/<ボリューム名>/DCIM/
-```
-
-**Sony A7S（`100MSDCF` など）を検出した場合:**
-
-ユーザーに確認する:
+**Sony A7S（`100MSDCF` など）を検出した場合:** ユーザーに確認する:
 
 > 「Sony のSDカードが検出されました（`/Volumes/Untitled/DCIM/100MSDCF`）。
 > RAW + JPEG が混在しています。JPEGのみコピーしてセレクトを進めますか？」
@@ -87,87 +83,92 @@ ls /Volumes/<ボリューム名>/DCIM/
 - 「はい」→ JPEG（`*.JPG`）のみコピー（以降の手順と同じ）
 - 「いいえ」→ ユーザーの指示を待つ
 
-#### 2. 撮影日の確認
+#### 0-3. ユーザーへの一括質問（1回で全情報を収集）
 
-ユーザーに1点だけ確認する:
+以下を **1つのメッセージ** でまとめて聞く。往復を増やさない:
 
-> 「どの日のデータですか？（例: 2026/03/20、または 2026/03/18〜2026/03/20 のように期間でも指定できます）」
+> 以下を教えてください:
+> 1. **撮影日** — 例: `2026/03/20`、または期間 `2025-12-17〜2025-12-20`
+> 2. **セッション名** — 例: `運動会2026_長男`、`202512_白山の旅`
+> 3. **撮影意図** — 誰の何を撮ったか、どんな雰囲気を残したいかを自由記述
 
-- **1日の場合**: コピー先パスのデフォルトは `~/Downloads/yyyy-mm-dd_JPEG`
-- **期間の場合**: コピー先パスのデフォルトは `~/Downloads/yyyy-mm-dd_yyyy-mm-dd_JPEG`
+ユーザーがまとめて答えてくれた場合は、確認なしに即次の手順へ進む。
+
+#### 0-4. jpeg_dir と OUTPUT_DIR を確定する（コピー前に設定）
+
+ユーザーの回答を受けたら、**コピーを開始する前に** パスを確定する:
+
+- **1日の場合**: `jpeg_dir=~/Downloads/yyyy-mm-dd_JPEG`
+- **期間の場合**: `jpeg_dir=~/Downloads/yyyy-mm-dd_yyyy-mm-dd_JPEG`
 
 ユーザーが別のパスを希望する場合はそちらを優先する。
 
-**jpeg_dir = コピー先パス**（以降のすべてのステップで使う）
-**OUTPUT_DIR** = `jpeg_dir` の親ディレクトリ（ユーザーが別途指定した場合はそちらを優先）
+```bash
+# パスを確定してディレクトリを作成する
+jpeg_dir=~/Downloads/2026-03-20_JPEG   # 実際の日付に置き換える
+OUTPUT_DIR="$jpeg_dir"
+mkdir -p "$jpeg_dir"
+```
 
-#### 3. 撮影日のファイルのみ抽出してコピー（バックグラウンド）
+**`jpeg_dir` と `OUTPUT_DIR` はここで確定する。以降のすべてのステップでこの値を使う。**
 
-**重要: `-newermt "yyyy-mm-dd"` は「その日の00:00:00より新しい」ため、前日のファイルも含んでしまう。必ず `"yyyy-mm-dd 00:00:00"` と時刻を明示すること。**
+#### 0-5. コピー実行（フォアグラウンド）
+
+**重要:**
+- `-newermt "yyyy-mm-dd"` は時刻なしだと前日のファイルも含む。必ず `"yyyy-mm-dd 00:00:00"` と時刻を明示する
+- `-exec rsync -a {} \;` は1ファイルごとにプロセス起動するため使わない。`xargs -0 -J %` で一括コピーする
 
 ```bash
-# 例: 2026-03-20 のみコピー（JPEG のみ）
-DEST=~/Downloads/2026-03-20_JPEG
-mkdir -p "$DEST"
+# 例: 2026-03-20 のみコピー
 find /Volumes/<SDカードボリューム>/DCIM/ -name "*.JPG" \
   -newermt "2026-03-20 00:00:00" ! -newermt "2026-03-21 00:00:00" \
-  -print0 | xargs -0 -J % cp % "$DEST/"
+  -print0 | xargs -0 -J % cp % "$jpeg_dir/"
 
 # 例: 2025-12-17〜2025-12-20 の期間コピー（終了日の翌日を上限に指定）
-DEST=~/Downloads/2025-12-17_2025-12-20_JPEG
-mkdir -p "$DEST"
 find /Volumes/<SDカードボリューム>/DCIM/ -name "*.JPG" \
   -newermt "2025-12-17 00:00:00" ! -newermt "2025-12-21 00:00:00" \
-  -print0 | xargs -0 -J % cp % "$DEST/"
+  -print0 | xargs -0 -J % cp % "$jpeg_dir/"
 ```
 
-**重要: `-exec rsync -a {} \;` は使わない。** ファイルごとにプロセスが起動するため、1000枚なら1000プロセス起動して極端に遅くなる。`xargs -0 -J %` で一括コピーすること。
+コピー中にユーザーへの追加質問があれば（撮影意図の補足など）この待機時間に行う。
 
-このコマンドを **バックグラウンドで開始**し、コピー中に Step 0-B を並行して進める。
+#### 0-6. コピー完了の確認（必須）
 
-> コピーが完了してから Step 1 へ進む。**jpeg_dir は必ずローカルパス（`~/Downloads/...`）を指定すること。SDカードパス（`/Volumes/...`）をそのままパイプラインに渡してはならない。**
-
----
-
-### Step 0-B: 撮影意図の確認
-
-**Step 0-A のコピー待機中に並行して実施する。**
-
-**重要: ユーザーへの質問は1回にまとめること。往復を最小化する。**
-
-以下を1つのメッセージで聞く:
-
-> 以下を教えてください（まとめて答えていただけると助かります）:
-> 1. **セッション名**: 例 `運動会2026_長男`、`school-PR-march`
-> 2. **撮影意図**: 「誰の何を撮った写真か」「どんな雰囲気を残したいか」を自由記述
-
-ユーザーがまとめて答えてくれた場合は、確認の往復なしに即 `session.json` を生成する。
-情報が欠けている場合だけ1回の追加質問にとどめる。
-
-**ステップ間の確認も最小化する:**
-- 各ステップ開始時は「～を実行します」と宣言するだけで、ユーザーの承認を求めない
-- エラーが発生したとき以外はユーザーへの質問を挟まない
-
-`session.json` を生成する。スクリプトが使える場合:
+**このステップをスキップして Step 1 に進んではならない。**
 
 ```bash
-${CLAUDE_PLUGIN_ROOT}/../../stage0/session_brief.py \
-  --session-name "<セッション名>" \
-  --output $OUTPUT_DIR/session.json
+ls "$jpeg_dir" | wc -l
 ```
 
-スクリプトが不要な場合はClaudeが直接Writeツールで生成してもよい:
+- ファイル数が 0 または著しく少ない場合 → SDカードのパスや日付指定を見直してユーザーに報告する
+- ファイル数が妥当な場合 → ユーザーに「コピー完了: N枚」と報告して Step 1 へ進む
+
+#### 0-7. session.json の生成
+
+`session.json` は **`$OUTPUT_DIR/session.json`** に保存する（`/tmp/` や一時ディレクトリは使わない）。
+
+Claudeが直接 Write ツールで生成する:
 
 ```json
 {
   "session_name": "<セッション名>",
   "intent": "<撮影意図>",
-  "jpeg_dir": "<JPEGフォルダのパス>",
+  "jpeg_dir": "<jpeg_dir の実パス>",
   "created_at": "<ISO8601タイムスタンプ>"
 }
 ```
 
-Step 0-A のコピー完了を確認してから Step 1 へ進む。
+またはスクリプト経由:
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/../../stage0/session_brief.py \
+  --session-name "<セッション名>" \
+  --output "$OUTPUT_DIR/session.json"
+```
+
+**ステップ間の確認を最小化する:**
+- 各ステップ開始時は「～を実行します」と宣言するだけで、ユーザーの承認を求めない
+- エラーが発生したとき以外はユーザーへの質問を挟まない
 
 ---
 
@@ -184,14 +185,16 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage1/analyze.py --help
 ```
 
-第2引数 `<xmp_dir>` は XMP サイドカーの書き出し先。CR3 フォルダがなければ任意のディレクトリを指定してよい。
+第2引数 `<xmp_dir>` は XMP サイドカーの書き出し先。`$OUTPUT_DIR/xmp` を使う（`/tmp/` は使わない）。
 詳細 CSV は `<xmp_dir>/stage1_results.csv` に自動保存される。
 
 ```bash
+xmp_dir="$OUTPUT_DIR/xmp"
+mkdir -p "$xmp_dir"
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage1/analyze.py \
-  <jpeg_dir> \
-  <xmp_dir>
+  "$jpeg_dir" \
+  "$xmp_dir"
 ```
 
 実行後、除外枚数をユーザーに報告する。除外率が異常に高い（>50%）場合は閾値を確認する。
@@ -206,9 +209,9 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage2/group.py \
-  <jpeg_dir> \
-  --xmp-dir <xmp_dir> \
-  --output $OUTPUT_DIR/stage2_groups.csv
+  "$jpeg_dir" \
+  --xmp-dir "$xmp_dir" \
+  --output "$OUTPUT_DIR/stage2_groups.csv"
 ```
 
 `--help` でオプションを確認すること。出力CSVのグループ数・SOLO枚数をユーザーに報告する。
@@ -218,8 +221,8 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage2/report.py \
-  <jpeg_dir> \
-  --groups-csv $OUTPUT_DIR/stage2_groups.csv \
+  "$jpeg_dir" \
+  --groups-csv "$OUTPUT_DIR/stage2_groups.csv" \
   --serve
 ```
 
