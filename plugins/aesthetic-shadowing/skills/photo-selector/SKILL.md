@@ -107,19 +107,25 @@ ls /Volumes/<ボリューム名>/DCIM/
 
 ```bash
 # 例: 2026-03-20 のみコピー（JPEG のみ）
+DEST=~/Downloads/2026-03-20_JPEG
+mkdir -p "$DEST"
 find /Volumes/<SDカードボリューム>/DCIM/ -name "*.JPG" \
   -newermt "2026-03-20 00:00:00" ! -newermt "2026-03-21 00:00:00" \
-  -exec rsync -a {} ~/Downloads/2026-03-20_JPEG/ \;
+  -print0 | xargs -0 -J % cp % "$DEST/"
 
 # 例: 2025-12-17〜2025-12-20 の期間コピー（終了日の翌日を上限に指定）
+DEST=~/Downloads/2025-12-17_2025-12-20_JPEG
+mkdir -p "$DEST"
 find /Volumes/<SDカードボリューム>/DCIM/ -name "*.JPG" \
   -newermt "2025-12-17 00:00:00" ! -newermt "2025-12-21 00:00:00" \
-  -exec rsync -a {} ~/Downloads/2025-12-17_2025-12-20_JPEG/ \;
+  -print0 | xargs -0 -J % cp % "$DEST/"
 ```
+
+**重要: `-exec rsync -a {} \;` は使わない。** ファイルごとにプロセスが起動するため、1000枚なら1000プロセス起動して極端に遅くなる。`xargs -0 -J %` で一括コピーすること。
 
 このコマンドを **バックグラウンドで開始**し、コピー中に Step 0-B を並行して進める。
 
-> コピーが完了していることを確認してから Step 1 へ進む。
+> コピーが完了してから Step 1 へ進む。**jpeg_dir は必ずローカルパス（`~/Downloads/...`）を指定すること。SDカードパス（`/Volumes/...`）をそのままパイプラインに渡してはならない。**
 
 ---
 
