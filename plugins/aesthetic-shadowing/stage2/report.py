@@ -94,6 +94,7 @@ def make_card(row: dict, jpeg_url: str, has_camera_rating: bool = False) -> str:
     expo  = row['exposure_score']
     tech_color = tech_score_color(tech)
     gid = row['group_id']
+    bonus = row.get("bonus_weight", 1.0)
 
     camera_rating_html = ''
     if has_camera_rating:
@@ -108,14 +109,17 @@ def make_card(row: dict, jpeg_url: str, has_camera_rating: bool = False) -> str:
 
     return f'''<div class="card" tabindex="0" data-stem="{stem}" data-gid="{gid}" data-url="{jpeg_url}"
   data-sharpness="{sharp:.3f}" data-exposure="{expo:.3f}" data-eye="{eye_val}"
-  data-persons="{n_persons}" data-position="{pos}"
+  data-persons="{n_persons}" data-position="{pos}" data-bonus="{bonus:.3f}"
   onclick="openModal('{jpeg_url}','{stem}',{gid})"
   onkeydown="cardKeydown(event,this)">
   <div class="thumb-wrap">
     <img src="{jpeg_url}" alt="{stem}" loading="lazy">
     <div class="select-overlay" id="sol-{stem}"></div>
     <button class="select-badge" id="sbadge-{stem}" onclick="toggleSelect(event,'{stem}')" title="セレクト切り替え"></button>
+    <button class="info-btn" onclick="showInfo(event,'{stem}')" title="スコア内訳">ℹ</button>
     <button class="exclude-btn" id="excbtn-{stem}" onclick="toggleExclude(event,'{stem}')" title="除外">🚫</button>
+    <button class="gap-btn" id="gapbtn-{stem}" onclick="openGapModal(event,'{stem}')" title="ギャップを報告">🚩</button>
+    <div class="gap-flag-label" id="gaplabel-{stem}" style="display:none">🚩</div>
     <div class="exclude-label" id="exclabel-{stem}" style="display:none">除外済み</div>
   </div>
   <div class="card-info">
@@ -215,6 +219,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     server_mode_js = 'true' if server_mode else 'false'
     confirm_btn_display = '' if server_mode else 'display:none'
     export_btn_display = '' if server_mode else 'display:none'
+    shutdown_btn_display = "" if server_mode else "display:none"
 
     return f'''<!DOCTYPE html>
 <html lang="ja">
@@ -389,6 +394,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
     transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
     flex-shrink: 0;
     outline: none;
+    position: relative;
   }}
   .card:hover {{ transform: translateY(-2px); border-color: #818cf8; }}
   .card:focus-visible {{
@@ -781,6 +787,116 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
   .export-btn:hover {{ border-color: #22c55e; background: #0d2a1f; }}
   .export-btn:disabled {{ opacity: 0.5; cursor: default; }}
 
+  /* ---- 情報ポップアップ ---- */
+  .info-btn {{
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0,0,0,0.55);
+    color: #94a3b8;
+    font-size: 0.7rem;
+    font-style: italic;
+    font-weight: 700;
+    cursor: pointer;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+    line-height: 1;
+  }}
+  .card:hover .info-btn {{ opacity: 1; }}
+  .info-popup {{
+    display: none;
+    position: fixed;
+    background: #0f1829;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 0.72rem;
+    color: #94a3b8;
+    z-index: 2000;
+    min-width: 210px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+    pointer-events: none;
+  }}
+  .info-popup.visible {{ display: block; }}
+  .info-popup-title {{ color: #818cf8; font-weight: 700; margin-bottom: 6px; font-size: 0.8rem; }}
+  .info-popup-row {{ display: flex; justify-content: space-between; gap: 12px; margin-bottom: 3px; }}
+  .info-popup-label {{ color: #64748b; }}
+  .info-popup-val {{ color: #f1f5f9; font-variant-numeric: tabular-nums; }}
+  .info-popup-divider {{ border: none; border-top: 1px solid #1e2d45; margin: 5px 0; }}
+
+  /* ---- ギャップフラグ ---- */
+  .gap-btn {{
+    position: absolute;
+    bottom: 30px;
+    right: 6px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0,0,0,0.55);
+    font-size: 0.7rem;
+    cursor: pointer;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+    line-height: 1;
+  }}
+  .card:hover .gap-btn,
+  .card.gap-flagged .gap-btn {{ opacity: 1; }}
+  .gap-flag-label {{
+    position: absolute;
+    top: 6px;
+    left: 32px;
+    font-size: 0.7rem;
+    pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+  }}
+  .card.gap-flagged {{ border-color: #ef4444 !important; box-shadow: 0 0 0 1px rgba(239,68,68,0.35); }}
+  .gap-modal {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 1500; align-items: center; justify-content: center; }}
+  .gap-modal.open {{ display: flex; }}
+  .gap-modal-box {{ background: #0f1829; border: 1px solid #2d1e1e; border-radius: 12px; padding: 20px; width: 380px; max-width: 92vw; }}
+  .gap-modal-title {{ font-size: 0.88rem; font-weight: 700; color: #f1f5f9; margin-bottom: 3px; }}
+  .gap-modal-stem {{ font-size: 0.7rem; color: #64748b; margin-bottom: 12px; }}
+  .gap-modal-label {{ font-size: 0.72rem; color: #94a3b8; margin-bottom: 6px; }}
+  .gap-modal-textarea {{
+    width: 100%; min-height: 80px; background: #0a0f1e; border: 1px solid #1e2d45;
+    border-radius: 6px; color: #e2e8f0; font-size: 0.8rem; font-family: inherit;
+    padding: 8px; resize: vertical; outline: none; transition: border-color 0.15s;
+    margin-bottom: 12px; box-sizing: border-box;
+  }}
+  .gap-modal-textarea:focus {{ border-color: #ef4444; }}
+  .gap-modal-textarea::placeholder {{ color: #334155; }}
+  .gap-modal-actions {{ display: flex; gap: 8px; justify-content: flex-end; }}
+  .gap-modal-cancel {{ padding: 6px 14px; border-radius: 6px; border: 1px solid #1e2d45; background: transparent; color: #64748b; font-size: 0.78rem; cursor: pointer; }}
+  .gap-modal-cancel:hover {{ border-color: #475569; color: #94a3b8; }}
+  .gap-modal-remove {{ padding: 6px 14px; border-radius: 6px; border: 1px solid #7f1d1d; background: transparent; color: #ef4444; font-size: 0.78rem; cursor: pointer; }}
+  .gap-modal-remove:hover {{ background: #1f0a0a; }}
+  .gap-modal-save {{ padding: 6px 14px; border-radius: 6px; border: 1px solid #991b1b; background: #450a0a; color: #fca5a5; font-size: 0.78rem; font-weight: 600; cursor: pointer; }}
+  .gap-modal-save:hover {{ background: #7f1d1d; border-color: #ef4444; color: #fff; }}
+  .gap-panel {{ background: #0f1829; border: 1px solid #2d1e1e; border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; }}
+  .gap-panel-title {{ font-size: 0.75rem; font-weight: 700; color: #ef4444; margin-bottom: 8px; letter-spacing: 0.04em; }}
+  .gap-count-row {{ display: flex; align-items: baseline; gap: 6px; margin-bottom: 8px; }}
+  .gap-count-n {{ font-size: 1.1rem; font-weight: 700; color: #ef4444; }}
+  .gap-count-label {{ font-size: 0.7rem; color: #64748b; }}
+  .gap-export-btn {{ display: block; width: 100%; padding: 6px 10px; border-radius: 6px; border: 1px solid #7f1d1d; background: transparent; color: #ef4444; font-size: 0.75rem; font-weight: 600; cursor: pointer; text-align: center; }}
+  .gap-export-btn:hover {{ background: #1f0a0a; border-color: #ef4444; }}
+  .gap-export-btn:disabled {{ opacity: 0.5; cursor: default; }}
+  .shutdown-btn {{ background: none; border: 1px solid #7f1d1d; color: #ef4444; font-size: 0.85rem; cursor: pointer; padding: 3px 8px; border-radius: 6px; line-height: 1; flex-shrink: 0; transition: all 0.15s; }}
+  .shutdown-btn:hover {{ background: #1f0a0a; border-color: #ef4444; }}
+
   @media (max-width: 899px) {{
     .sidebar {{ width: 260px; }}
   }}
@@ -791,6 +907,7 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
 <div class="header">
   <div class="header-top">
     <button class="hamburger" onclick="toggleSidebar()" title="サイドパネル切り替え">☰</button>
+    <button class="shutdown-btn" onclick="shutdownServer()" title="サーバーを停止" style="{shutdown_btn_display}">🔴</button>
     <h1>Aesthetic Shadowing Agent — <span>Stage 2 グループレポート</span></h1>
   </div>
   <div class="stats">
@@ -893,12 +1010,41 @@ def generate_html(rows: list[dict], jpeg_dir: Path, session_info: dict | None = 
         人物なしを非表示
       </label>
     </div>
+    <div class="gap-panel">
+      <div class="gap-panel-title">ギャップレポート</div>
+      <div class="gap-count-row">
+        <span class="gap-count-n" id="gap-count">0</span>
+        <span class="gap-count-label">件フラグ済み</span>
+      </div>
+      <button class="gap-export-btn" id="btn-export-gaps"
+              onclick="exportGaps()" style="{export_btn_display}">
+        📊 ギャップをエクスポート
+      </button>
+    </div>
   </aside>
 
   <div class="main-panel">
     <div class="counter" id="counter">表示: {n_groups} グループ</div>
     <div id="groups">
 {groups_html}
+    </div>
+  </div>
+</div>
+
+<div class="info-popup" id="info-popup"></div>
+
+<!-- ギャップモーダル -->
+<div class="gap-modal" id="gap-modal">
+  <div class="gap-modal-box">
+    <div class="gap-modal-title">🚩 スコアギャップを報告</div>
+    <div class="gap-modal-stem" id="gap-modal-stem"></div>
+    <div class="gap-modal-label">なぜスコアと感覚がずれているか（自由記述）:</div>
+    <textarea class="gap-modal-textarea" id="gap-modal-memo"
+              placeholder="例: 瞳が開いているのにeye_scoreが低い、人物がいないのにperson_countが1、など"></textarea>
+    <div class="gap-modal-actions">
+      <button class="gap-modal-cancel" onclick="closeGapModal()">キャンセル</button>
+      <button class="gap-modal-remove" id="gap-modal-remove" onclick="removeGap()" style="display:none">フラグを削除</button>
+      <button class="gap-modal-save" onclick="saveGap()">保存</button>
     </div>
   </div>
 </div>
@@ -1379,6 +1525,145 @@ window.exportSelections = function() {{
   }});
 }})();
 
+// ---- 情報ポップアップ ----
+(function() {{
+  const popup = document.getElementById("info-popup");
+  let hideTimer = null;
+  window.showInfo = function(e, stem) {{
+    e.stopPropagation();
+    const card = document.querySelector(".card[data-stem=\"" + stem + "\"]");
+    if (!card || !popup) return;
+    const sharp   = parseFloat(card.dataset.sharpness);
+    const expo    = parseFloat(card.dataset.exposure);
+    const eyeRaw  = parseFloat(card.dataset.eye);
+    const eyeVal  = eyeRaw >= 0 ? eyeRaw : 0;
+    const p       = parseInt(card.dataset.persons);
+    const isFirst = card.dataset.position === "first";
+    const bonus   = parseFloat(card.dataset.bonus || "1");
+    const wSharp = parseFloat((document.getElementById("w-sharpness") || {{}}).value || "0.50");
+    const wExpo  = parseFloat((document.getElementById("w-exposure")  || {{}}).value || "0.40");
+    const wEye   = parseFloat((document.getElementById("w-eye")       || {{}}).value || "0.20");
+    const wPers  = parseFloat((document.getElementById("w-persons")   || {{}}).value || "0.20");
+    const wFirst = parseFloat((document.getElementById("w-first")     || {{}}).value || "0.20");
+    const total  = wSharp + wExpo + wEye + wPers + wFirst;
+    const personNorm = Math.min(p / 3, 1.0);
+    const firstVal   = isFirst ? 1.0 : 0.0;
+    const raw   = wSharp*sharp + wExpo*expo + wEye*eyeVal + wPers*personNorm + wFirst*firstVal;
+    const score = total > 0 ? raw / total : 0;
+    function f(v) {{ return v.toFixed(3); }}
+    const eyeLabel = eyeRaw < 0 ? "顔なし(0)" : f(eyeVal);
+    popup.innerHTML =
+      "<div class=\"info-popup-title\">技術スコア " + score.toFixed(3) + "</div>" +
+      "<hr class=\"info-popup-divider\">" +
+      "<div class=\"info-popup-row\"><span class=\"info-popup-label\">鮮鋭度</span><span class=\"info-popup-val\">" + f(sharp) + " × " + f(wSharp) + "</span></div>" +
+      "<div class=\"info-popup-row\"><span class=\"info-popup-label\">露出</span><span class=\"info-popup-val\">" + f(expo) + " × " + f(wExpo) + "</span></div>" +
+      "<div class=\"info-popup-row\"><span class=\"info-popup-label\">瞳スコア</span><span class=\"info-popup-val\">" + eyeLabel + " × " + f(wEye) + "</span></div>" +
+      "<div class=\"info-popup-row\"><span class=\"info-popup-label\">人物</span><span class=\"info-popup-val\">" + p + "人(" + f(personNorm) + ") × " + f(wPers) + "</span></div>" +
+      "<div class=\"info-popup-row\"><span class=\"info-popup-label\">連写位置</span><span class=\"info-popup-val\">" + card.dataset.position + " × " + f(wFirst) + "</span></div>" +
+      "<hr class=\"info-popup-divider\">" +
+      "<div class=\"info-popup-row\"><span class=\"info-popup-label\">連写ボーナス</span><span class=\"info-popup-val\">×" + f(bonus) + "</span></div>";
+    const btn = e.currentTarget || e.target;
+    const rect = btn.getBoundingClientRect();
+    popup.style.left = Math.min(rect.right + 8, window.innerWidth - 230) + "px";
+    popup.style.top  = Math.max(rect.top - 10, 6) + "px";
+    popup.classList.add("visible");
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = setTimeout(function() {{ popup.classList.remove("visible"); }}, 5000);
+  }};
+  document.addEventListener("click", function() {{ if (popup) popup.classList.remove("visible"); }});
+}})();
+
+// ---- ギャップフラグ ----
+(function() {{
+  const GAP_KEY = "asa-gaps-" + _FILENAME;
+  let gapState = {{}};
+  function loadGapState() {{
+    try {{ const s = localStorage.getItem(GAP_KEY); gapState = s ? JSON.parse(s) : {{}}; }} catch(e) {{ gapState = {{}}; }}
+  }}
+  function saveGapState() {{
+    try {{ localStorage.setItem(GAP_KEY, JSON.stringify(gapState)); }} catch(e) {{}}
+  }}
+  window.updateGapVisual = function(stem) {{
+    const card = document.querySelector(".card[data-stem=\"" + stem + "\"]");
+    if (!card) return;
+    card.classList.toggle("gap-flagged", !!gapState[stem]);
+    const lbl = document.getElementById("gaplabel-" + stem);
+    if (lbl) lbl.style.display = gapState[stem] ? "" : "none";
+  }};
+  function updateGapSummary() {{
+    const el = document.getElementById("gap-count");
+    if (el) el.textContent = Object.keys(gapState).length;
+  }}
+  let _gapStem = null;
+  window.openGapModal = function(e, stem) {{
+    e.stopPropagation();
+    _gapStem = stem;
+    const modal = document.getElementById("gap-modal");
+    const stemEl = document.getElementById("gap-modal-stem");
+    const ta = document.getElementById("gap-modal-memo");
+    const rmBtn = document.getElementById("gap-modal-remove");
+    if (stemEl) stemEl.textContent = stem;
+    const ex = gapState[stem];
+    if (ta) ta.value = ex ? (ex.memo || "") : "";
+    if (rmBtn) rmBtn.style.display = ex ? "" : "none";
+    if (modal) modal.classList.add("open");
+    setTimeout(function() {{ if (ta) ta.focus(); }}, 50);
+  }};
+  window.closeGapModal = function() {{
+    const modal = document.getElementById("gap-modal");
+    if (modal) modal.classList.remove("open");
+    _gapStem = null;
+  }};
+  window.saveGap = function() {{
+    if (!_gapStem) return;
+    const ta = document.getElementById("gap-modal-memo");
+    gapState[_gapStem] = {{ memo: ta ? ta.value.trim() : "", flaggedAt: new Date().toISOString() }};
+    saveGapState(); updateGapVisual(_gapStem); updateGapSummary(); closeGapModal();
+  }};
+  window.removeGap = function() {{
+    if (!_gapStem) return;
+    delete gapState[_gapStem];
+    saveGapState(); updateGapVisual(_gapStem); updateGapSummary(); closeGapModal();
+  }};
+  window.exportGaps = function() {{
+    if (!_SERVER_MODE) return;
+    const btn = document.getElementById("btn-export-gaps");
+    if (btn) {{ btn.disabled = true; btn.textContent = "書き出し中..."; }}
+    fetch("/export-gaps", {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json"}},
+      body: JSON.stringify({{ gaps: gapState }})
+    }})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(d) {{
+      if (btn) {{
+        btn.disabled = false;
+        btn.textContent = d.ok ? ("✅ " + d.count + "件書き出し") : ("❌ " + (d.error || "エラー"));
+        setTimeout(function() {{ if (btn) btn.textContent = "📊 ギャップをエクスポート"; }}, 3000);
+      }}
+    }})
+    .catch(function() {{
+      if (btn) {{ btn.disabled = false; btn.textContent = "❌ 通信エラー"; setTimeout(function() {{ if (btn) btn.textContent = "📊 ギャップをエクスポート"; }}, 3000); }}
+    }});
+  }};
+  window.shutdownServer = function() {{
+    if (!_SERVER_MODE) return;
+    if (!confirm("サーバーを停止しますか？")) return;
+    fetch("/shutdown", {{ method: "POST" }})
+      .then(function() {{ document.body.innerHTML = "<div style=\"color:#ef4444;font-family:sans-serif;padding:40px;font-size:1.2rem;\">サーバーを停止しました</div>"; }})
+      .catch(function() {{ document.body.innerHTML = "<div style=\"color:#ef4444;font-family:sans-serif;padding:40px;font-size:1.2rem;\">サーバーを停止しました</div>"; }});
+  }};
+  document.addEventListener("DOMContentLoaded", function() {{
+    const gm = document.getElementById("gap-modal");
+    if (gm) gm.addEventListener("click", function(e) {{ if (e.target === this) closeGapModal(); }});
+  }});
+  loadGapState();
+  window._initGapVisuals = function() {{
+    Object.keys(gapState).forEach(function(s) {{ updateGapVisual(s); }});
+    updateGapSummary();
+  }};
+}})();
+
 // ---- 初期化 ----
 loadSelectState();
 loadExcludeState();
@@ -1387,6 +1672,7 @@ ALL_SHOTS.forEach(s => updateCardVisual(s.stem));
 ALL_SHOTS.forEach(s => updateCardExcludeVisual(s.stem));
 updateSummary();
 applyAllFilters();
+if (typeof _initGapVisuals === "function") _initGapVisuals();
 </script>
 </body>
 </html>'''
