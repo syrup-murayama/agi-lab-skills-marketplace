@@ -1438,6 +1438,22 @@ def start_flask_server(jpeg_dir: Path, csv_path: Path,
     except ImportError:
         _update_metadata = None
 
+    # セッション情報をファイルに保存（--resume / --stop 用）
+    import json as _json
+    import datetime as _dt
+    _session_file = csv_path.parent / 'report_session.json'
+    _session_data = {
+        'jpeg_dir': str(jpeg_dir),
+        'csv_path': str(csv_path),
+        'session_json': str(Path(session_info.get('_path', ''))) if session_info and session_info.get('_path') else None,
+        'port': port,
+        'pid': __import__('os').getpid(),
+        'started_at': _dt.datetime.now().isoformat(),
+    }
+    with open(_session_file, 'w', encoding='utf-8') as _sf:
+        _json.dump(_session_data, _sf, ensure_ascii=False, indent=2)
+    print(f'セッション情報を保存: {_session_file}')
+
     app = Flask(__name__)
     html_holder: dict = {'html': ''}
 
@@ -1526,6 +1542,37 @@ def start_flask_server(jpeg_dir: Path, csv_path: Path,
         except Exception as e:
             return jsonify({'ok': False, 'error': str(e)}), 500
 
+    @app.route('/shutdown', methods=['POST'])
+    def shutdown():
+        import threading as _threading
+        _threading.Timer(0.3, lambda: __import__('os')._exit(0)).start()
+        return jsonify({'ok': True})
+
+    @app.route('/export-gaps', methods=['POST'])
+    def export_gaps():
+        try:
+            data = request.get_json(force=True)
+            gaps = data.get('gaps', {})
+            import json as _json2
+            import datetime as _dt2
+            output_path = csv_path.parent / 'stage2_gaps.json'
+            with open(output_path, 'w', encoding='utf-8') as _f:
+                _json2.dump({
+                    'exported_at': _dt2.datetime.now().isoformat(),
+                    'total': len(gaps),
+                    'gaps': [
+                        {
+                            'stem': stem,
+                            'memo': info.get('memo', '') if isinstance(info, dict) else str(info),
+                            'flaggedAt': info.get('flaggedAt', '') if isinstance(info, dict) else ''
+                        }
+                        for stem, info in gaps.items()
+                    ]
+                }, _f, ensure_ascii=False, indent=2)
+            return jsonify({'ok': True, 'count': len(gaps), 'path': str(output_path)})
+        except Exception as e:
+            return jsonify({'ok': False, 'error': str(e)}), 500
+
     import webbrowser
     url = f'http://localhost:{port}/'
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
@@ -1548,9 +1595,61 @@ def main() -> None:
                         help='セッション情報JSONファイル (省略可)')
     parser.add_argument('--serve', action='store_true',
                         help='Flaskサーバーモードで起動（ウェイト確定ボタン有効）')
+    parser.add_argument('--daemon', action='store_true',
+                        help='バックグラウンドデーモンとして起動（Claudeセッション終了後も継続）')
+    parser.add_argument('--resume', metavar='SESSION_FILE', default=None,
+                        help='保存されたセッションファイルからサーバーを再起動')
+    parser.add_argument('--stop', metavar='SESSION_FILE', default=None,
+                        help='セッションファイルのPIDを読んでサーバーを停止')
     parser.add_argument('--port', type=int, default=5002,
                         help='Flaskサーバーポート番号 (デフォルト: 5002)')
     args = parser.parse_args()
+
+    # --stop
+    if args.stop:
+        import json as _json, signal as _signal
+        _stop_path = Path(args.stop)
+        if not _stop_path.exists():
+            print(f'エラー: セッションファイルが見つかりません: {_stop_path}')
+            sys.exit(1)
+        with open(_stop_path, encoding='utf-8') as _f:
+            _sess = _json.load(_f)
+        _pid = _sess.get('pid')
+        if not _pid:
+            print('エラー: セッションファイルに PID がありません')
+            sys.exit(1)
+        try:
+            import os as _os
+            _os.kill(_pid, _signal.SIGTERM)
+            print(f'サーバーを停止しました (PID: {_pid})')
+            with open(_stop_path, 'w', encoding='utf-8') as _f:
+                import json as _json2
+                _json2.dump({'stopped': True, 'pid': _pid}, _f)
+        except ProcessLookupError:
+            print(f'プロセスが見つかりません (PID: {_pid}) — すでに停止済みかもしれません')
+        sys.exit(0)
+
+    # --resume
+    if args.resume:
+        import json as _json
+        _resume_path = Path(args.resume)
+        if not _resume_path.exists():
+            print(f'エラー: セッションファイルが見つかりません: {_resume_path}')
+            sys.exit(1)
+        with open(_resume_path, encoding='utf-8') as _f:
+            _sess = _json.load(_f)
+        _jpeg_dir_r = Path(_sess['jpeg_dir'])
+        _csv_path_r = Path(_sess['csv_path'])
+        _port_r     = _sess.get('port', 5002)
+        _session_info_r = None
+        _sj = _sess.get('session_json')
+        if _sj and Path(_sj).exists():
+            with open(Path(_sj), encoding='utf-8') as _f2:
+                _session_info_r = _json.load(_f2)
+            _session_info_r['_path'] = str(Path(_sj))
+        print(f'セッションを再開: {_resume_path}')
+        start_flask_server(_jpeg_dir_r, _csv_path_r, _session_info_r, port=_port_r)
+        sys.exit(0)
 
     jpeg_dir  = Path(args.jpeg_dir)
     csv_path  = Path(args.stage2_csv)
@@ -1568,10 +1667,33 @@ def main() -> None:
             sys.exit(1)
         with open(session_json_path, encoding='utf-8') as f:
             session_info = json.load(f)
+        session_info['_path'] = str(session_json_path)
 
     if args.serve:
+        if args.daemon:
+            import subprocess as _sp
+            import time as _time
+            _new_argv = [a for a in sys.argv[1:] if a != '--daemon']
+            _log_path = csv_path.parent / 'report_server.log'
+            _proc = _sp.Popen(
+                [sys.executable, str(Path(__file__).resolve())] + _new_argv,
+                stdout=open(_log_path, 'w'),
+                stderr=_sp.STDOUT,
+                start_new_session=True,
+            )
+            _time.sleep(0.8)
+            _url = f'http://localhost:{args.port}/'
+            _session_file = csv_path.parent / 'report_session.json'
+            _resume_cmd = f'python {Path(__file__).resolve()} --resume {_session_file}'
+            _stop_cmd   = f'python {Path(__file__).resolve()} --stop {_session_file}'
+            print(f'\nデーモンとして起動しました (PID: {_proc.pid})')
+            print(f'URL:      {_url}')
+            print(f'再起動:   {_resume_cmd}')
+            print(f'停止:     {_stop_cmd}')
+            print(f'ログ:     {_log_path}')
+            sys.exit(0)
         start_flask_server(jpeg_dir, csv_path, session_info, port=args.port)
-        return
+        sys.exit(0)
 
     rows = load_groups(csv_path)
 
