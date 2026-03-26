@@ -57,6 +57,8 @@ def parse_args() -> argparse.Namespace:
                    help="batch_scores.csv のパス（省略時は全JPEG均等扱い）")
     p.add_argument("--target", type=int, default=0, metavar="N",
                    help="目標納品枚数（0=制限なし）")
+    p.add_argument("--no-ai-rating", action="store_true",
+                   help="AIレーティングを非表示にする（クライアント向けバイアスなし版）")
     return p.parse_args()
 
 
@@ -193,7 +195,8 @@ def generate_images(jpegs: list[Path], jpeg_dir: Path, out_dir: Path) -> None:
 # ─── HTML生成 ─────────────────────────────────────────────────────────────────
 
 def generate_html(photos: list[dict], client: str, email: str, target: int,
-                  storage_key: str, storage_key_ratings: str) -> str:
+                  storage_key: str, storage_key_ratings: str,
+                  show_ai_rating: bool = True) -> str:
     target_str = str(target) if target > 0 else '─'
     total      = len(photos)
 
@@ -202,7 +205,7 @@ def generate_html(photos: list[dict], client: str, email: str, target: int,
             'filename':      p['filename'],
             'thumbName':     p['thumb_name'],
             'groupId':       p.get('group_id', 0),
-            'initialRating': p.get('initial_rating', 0),
+            'initialRating': p.get('initial_rating', 0) if show_ai_rating else None,
             'datetime':      p.get('datetime_str', ''),
             'starRating':    p.get('star_rating', 0),
             'compositeScore': p.get('composite_score', 0.0),
@@ -848,6 +851,7 @@ def main() -> None:
         target=args.target,
         storage_key=storage_key,
         storage_key_ratings=storage_key_ratings,
+        show_ai_rating=not args.no_ai_rating,
     )
 
     index_path = out_dir / 'index.html'
