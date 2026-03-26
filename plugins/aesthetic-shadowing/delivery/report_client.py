@@ -207,18 +207,17 @@ def reassign_groups_clip(photos: list[dict], thumbs_dir: Path) -> None:
         clusters: list[list[int]] = []
         cluster_reps: list[object] = []   # 各クラスタ代表の埋め込み (or None)
 
+        no_emb: list[int] = []  # embedding取得失敗した写真
+
         for idx in indices:
             fn = photos[idx]['filename']
             emb = embeddings.get(fn)
             if emb is None:
-                clusters.append([idx])
-                cluster_reps.append(None)
+                no_emb.append(idx)
                 continue
 
             assigned = False
             for ci, rep_emb in enumerate(cluster_reps):
-                if rep_emb is None:
-                    continue
                 sim = float(_torch.dot(emb, rep_emb))
                 if sim >= THRESHOLD:
                     clusters[ci].append(idx)
@@ -227,6 +226,13 @@ def reassign_groups_clip(photos: list[dict], thumbs_dir: Path) -> None:
             if not assigned:
                 clusters.append([idx])
                 cluster_reps.append(emb)
+
+        # embedding なし写真は最後のクラスタに追加（なければ独立クラスタ）
+        for idx in no_emb:
+            if clusters:
+                clusters[-1].append(idx)
+            else:
+                clusters.append([idx])
 
         for cluster in clusters:
             global_group_id += 1
@@ -249,10 +255,12 @@ def load_scores(csv_path: str) -> dict:
         return scores
     with open(p, newline='', encoding='utf-8') as f:
         for row in csv.DictReader(f):
-            scores[row['filename']] = {
-                'star_rating': int(row.get('star_rating', 0)),
-                'composite_score': float(row.get('composite_score', 0.0)),
-            }
+            try:
+                star = int(row.get('star_rating') or 0)
+                score = float(row.get('composite_score') or 0.0)
+            except ValueError:
+                star, score = 0, 0.0
+            scores[row['filename']] = {'star_rating': star, 'composite_score': score}
     return scores
 
 
@@ -346,6 +354,42 @@ def generate_html(photos: list[dict], client: str, email: str, target: int,
         '<div class="progress-fill" id="progress-fill" style="width:0%"></div>'
         '</div></div>'
     ) if target > 0 else ''
+
+    # パスワード認証オーバーレイ（password_hash が空なら無効）
+    if password_hash:
+        auth_overlay_html = (
+            '<div id="auth-overlay" class="visible">'
+            '<div class="auth-box">'
+            '<h2>🔒 納品レビュー</h2>'
+            '<p>アクセスにはパスワードが必要です</p>'
+            '<input type="password" id="auth-pw" placeholder="パスワード"'
+            ' onkeydown="if(event.key===\'Enter\')checkAuth()" />'
+            '<button onclick="checkAuth()">開く</button>'
+            '<div class="auth-error" id="auth-err">パスワードが違います</div>'
+            '</div></div>'
+        )
+        auth_js = (
+            f'const AUTH_HASH = "{password_hash}";\n'
+            f'const AUTH_SKEY = "auth_{storage_key}";\n'
+            'async function checkAuth() {\n'
+            '  const pw = document.getElementById("auth-pw").value;\n'
+            '  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pw));\n'
+            '  const hex = Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");\n'
+            '  if (hex === AUTH_HASH) {\n'
+            '    sessionStorage.setItem(AUTH_SKEY, "1");\n'
+            '    document.getElementById("auth-overlay").classList.remove("visible");\n'
+            '    loadState();\n'
+            '  } else {\n'
+            '    document.getElementById("auth-err").style.display = "block";\n'
+            '  }\n'
+            '}\n'
+            'if (!sessionStorage.getItem(AUTH_SKEY)) {\n'
+            '  document.getElementById("auth-overlay").classList.add("visible");\n'
+            '} else { loadState(); }\n'
+        )
+    else:
+        auth_overlay_html = ''
+        auth_js = 'loadState();'
 
     return f'''\
 <!DOCTYPE html>
@@ -552,6 +596,8 @@ def generate_html(photos: list[dict], client: str, email: str, target: int,
 </style>
 </head>
 <body>
+
+{auth_overlay_html}
 
 <header>
   <div class="hd-row1">
@@ -985,7 +1031,7 @@ function exportFeedback() {{
 }}
 
 // ─── Init ────────────────────────────────────────────────────────────────────
-loadState();
+{auth_js}
 render();
 </script>
 
@@ -1027,6 +1073,7 @@ def main() -> None:
     storage_key         = f"delivery_{out_dir.name}_selections"
     storage_key_ratings = f"asa-delivery-ratings-{out_dir.name}"
 
+    pw_hash = sha256_hex(args.password) if args.password else ""
     html_content = generate_html(
         photos,
         client=args.client,
@@ -1035,6 +1082,7 @@ def main() -> None:
         storage_key=storage_key,
         storage_key_ratings=storage_key_ratings,
         show_ai_rating=not args.no_ai_rating,
+        password_hash=pw_hash,
     )
 
     index_path = out_dir / 'index.html'
