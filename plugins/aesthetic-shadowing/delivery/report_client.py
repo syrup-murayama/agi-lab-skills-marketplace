@@ -59,6 +59,11 @@ def parse_args() -> argparse.Namespace:
                    help="目標納品枚数（0=制限なし）")
     p.add_argument("--no-ai-rating", action="store_true",
                    help="AIレーティングを非表示にする（クライアント向けバイアスなし版）")
+    p.add_argument("--password", default="", metavar="PASS",
+                   help="閲覧パスワード（設定するとSHA-256ハッシュで保護される）")
+    p.add_argument("--group-mode", choices=['time', 'clip'], default='time',
+                   metavar='MODE',
+                   help="グルーピング方式: time=時間ベース（デフォルト）, clip=時間+CLIP視覚類似度")
     return p.parse_args()
 
 
@@ -115,6 +120,122 @@ def assign_groups(photos: list[dict]) -> None:
             next_group += 1
 
 
+# ─── CLIPグルーピング ─────────────────────────────────────────────────────────
+
+def reassign_groups_clip(photos: list[dict], thumbs_dir: Path) -> None:
+    """時間ウィンドウ10分 + CLIP視覚類似度 >= 0.82 によるグループ再割り当て。
+    open_clip / torch が使えない場合は時間ベースのまま警告を出す。"""
+    try:
+        import torch
+        import open_clip
+        from PIL import Image as PILImage
+    except ImportError:
+        print("WARNING: open_clip/torch が見つかりません。time モードにフォールバックします。",
+              file=sys.stderr)
+        return
+
+    # ─ デバイス選択
+    if torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+    print(f"  CLIP デバイス: {device}", file=sys.stderr)
+
+    # ─ モデルロード
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        'ViT-B-32', pretrained='openai', device=device
+    )
+    model.eval()
+
+    # ─ 埋め込み計算
+    embeddings: dict[str, object] = {}
+    total = len(photos)
+    for i, p in enumerate(photos, 1):
+        thumb_path = thumbs_dir / p['thumb_name']
+        if not thumb_path.exists():
+            continue
+        try:
+            img = preprocess(PILImage.open(thumb_path).convert('RGB')).unsqueeze(0).to(device)
+            with torch.no_grad():
+                feat = model.encode_image(img)
+            feat = feat / feat.norm(dim=-1, keepdim=True)  # L2正規化
+            embeddings[p['filename']] = feat.squeeze(0).cpu()
+        except Exception:
+            pass
+        if i % 50 == 0 or i == total:
+            print(f"\r  CLIP埋め込み: {i}/{total}", end='', file=sys.stderr, flush=True)
+    print(f"\r  CLIP埋め込み完了: {len(embeddings)} 枚              ", file=sys.stderr)
+
+    # ─ 時間ウィンドウ10分で仮グループ作成
+    FMT = '%Y:%m:%d %H:%M:%S'
+    dated: list[tuple[int, datetime]] = []
+    for i, p in enumerate(photos):
+        dt_str = p.get('datetime_str', '')
+        if dt_str:
+            try:
+                dated.append((i, datetime.strptime(dt_str, FMT)))
+            except ValueError:
+                pass
+    dated.sort(key=lambda x: x[1])
+
+    time_group: dict[int, int] = {}
+    tg_id = 0
+    prev_dt_clip: datetime | None = None
+    for idx, dt in dated:
+        if prev_dt_clip is None or (dt - prev_dt_clip).total_seconds() > 600:
+            tg_id += 1
+        time_group[idx] = tg_id
+        prev_dt_clip = dt
+    next_tg = tg_id + 1
+    for i in range(len(photos)):
+        if i not in time_group:
+            time_group[i] = next_tg
+            next_tg += 1
+
+    # ─ 時間グループ → dict[tg_id, list[photo_index]]
+    from collections import defaultdict
+    tg_map: dict[int, list[int]] = defaultdict(list)
+    for idx, tg in time_group.items():
+        tg_map[tg].append(idx)
+
+    # ─ 各時間グループ内で CLIP greedy clustering (閾値 0.82)
+    import torch as _torch  # already imported above, alias for clarity
+    THRESHOLD = 0.82
+    global_group_id = 0
+    for tg in sorted(tg_map.keys()):
+        indices = tg_map[tg]
+        clusters: list[list[int]] = []
+        cluster_reps: list[object] = []   # 各クラスタ代表の埋め込み (or None)
+
+        for idx in indices:
+            fn = photos[idx]['filename']
+            emb = embeddings.get(fn)
+            if emb is None:
+                clusters.append([idx])
+                cluster_reps.append(None)
+                continue
+
+            assigned = False
+            for ci, rep_emb in enumerate(cluster_reps):
+                if rep_emb is None:
+                    continue
+                sim = float(_torch.dot(emb, rep_emb))
+                if sim >= THRESHOLD:
+                    clusters[ci].append(idx)
+                    assigned = True
+                    break
+            if not assigned:
+                clusters.append([idx])
+                cluster_reps.append(emb)
+
+        for cluster in clusters:
+            global_group_id += 1
+            for idx in cluster:
+                photos[idx]['group_id'] = global_group_id
+
+    print(f"  CLIPグルーピング完了: {global_group_id} グループ", file=sys.stderr)
+
+
 # ─── データ読み込み ───────────────────────────────────────────────────────────
 
 def load_scores(csv_path: str) -> dict:
@@ -156,8 +277,8 @@ def build_photo_list(jpegs: list[Path], scores: dict) -> list[dict]:
             'thumb_name':     src.stem + '.jpg',
             'star_rating':    sc.get('star_rating', 0),
             'composite_score': sc.get('composite_score', 0.0),
-            'initial_rating': int(exif.get('XMP:Rating', 0) or 0),
-            'datetime_str':   exif.get('EXIF:DateTimeOriginal', '') or '',
+            'initial_rating': sc.get('star_rating', 0),
+            'datetime_str':   exif.get('DateTimeOriginal', '') or '',
         })
 
     photos.sort(key=lambda x: (-x['star_rating'], -x['composite_score']))
@@ -194,9 +315,15 @@ def generate_images(jpegs: list[Path], jpeg_dir: Path, out_dir: Path) -> None:
 
 # ─── HTML生成 ─────────────────────────────────────────────────────────────────
 
+def sha256_hex(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
 def generate_html(photos: list[dict], client: str, email: str, target: int,
                   storage_key: str, storage_key_ratings: str,
-                  show_ai_rating: bool = True) -> str:
+                  show_ai_rating: bool = True,
+                  password_hash: str = "") -> str:
     target_str = str(target) if target > 0 else '─'
     total      = len(photos)
 
@@ -308,6 +435,12 @@ def generate_html(photos: list[dict], client: str, email: str, target: int,
   }}
   .group-header .g-dt {{ color: #4b5563; }}
   .group-header .g-cnt {{ color: #4b5563; }}
+  .best-badge {{
+    position: absolute; top: 4px; left: 4px;
+    background: rgba(34,197,94,0.85); color: #fff;
+    font-size: 0.6rem; font-weight: 700; padding: 2px 6px;
+    border-radius: 3px; pointer-events: none; letter-spacing: 0.05em;
+  }}
 
   /* ─── Card ─── */
   .card {{
@@ -391,6 +524,31 @@ def generate_html(photos: list[dict], client: str, email: str, target: int,
 
   /* ─── Footer ─── */
   footer {{ text-align: center; padding: 28px 16px; color: #374151; font-size: 0.75rem; }}
+
+  /* ─── Auth overlay ─── */
+  #auth-overlay {{
+    display: none; position: fixed; inset: 0; z-index: 9999;
+    background: #0f0f0f; align-items: center; justify-content: center;
+  }}
+  #auth-overlay.visible {{ display: flex; }}
+  .auth-box {{
+    background: #1a1a1a; border: 1px solid #2d2d2d; border-radius: 10px;
+    padding: 36px 40px; width: 320px; text-align: center;
+  }}
+  .auth-box h2 {{ font-size: 1rem; color: #e5e5e5; margin-bottom: 6px; }}
+  .auth-box p  {{ font-size: 0.75rem; color: #6b7280; margin-bottom: 20px; }}
+  .auth-box input {{
+    width: 100%; padding: 10px 12px; border-radius: 6px;
+    background: #111; border: 1px solid #374151; color: #e5e5e5;
+    font-size: 0.9rem; margin-bottom: 12px; outline: none;
+  }}
+  .auth-box input:focus {{ border-color: #4b5563; }}
+  .auth-box button {{
+    width: 100%; padding: 10px; background: #2563eb; color: #fff;
+    border: none; border-radius: 6px; font-size: 0.9rem; cursor: pointer;
+  }}
+  .auth-box button:hover {{ background: #1d4ed8; }}
+  .auth-error {{ color: #ef4444; font-size: 0.75rem; margin-top: 8px; display: none; }}
 </style>
 </head>
 <body>
@@ -417,8 +575,8 @@ def generate_html(photos: list[dict], client: str, email: str, target: int,
     <span class="stat-item stat-un">未 <span class="n" id="stat-un">{total}</span></span>
   </div>
   <div class="hd-row2">
-    <button class="view-btn active" id="btn-grid"  onclick="setView('grid')">グリッド</button>
-    <button class="view-btn"        id="btn-group" onclick="setView('group')">グループ</button>
+    <button class="view-btn"        id="btn-grid"  onclick="setView('grid')">グリッド</button>
+    <button class="view-btn active" id="btn-group" onclick="setView('group')">グループ</button>
     <select class="sort-select" id="sort-select" onchange="setSort(this.value)">
       <option value="default">デフォルト順</option>
       <option value="score">スコア降順</option>
@@ -459,7 +617,7 @@ const PHOTOS = {photo_data_js};
 
 let sel     = {{}};   // filename → true
 let ratings = {{}};   // filename → 1..4
-let currentView = 'grid';
+let currentView = 'group';
 let currentSort = 'default';
 let lbPhotos    = [];   // 現在の表示順（ライトボックスナビ用）
 let lbIdx       = -1;
@@ -605,17 +763,29 @@ function renderGrid() {{
 }}
 
 function renderGroups() {{
-  const sorted = getSortedPhotos();
-  // Group view: sort by groupId asc, then datetime asc within group
-  const grouped = sorted.slice().sort((a, b) => {{
-    if (a.groupId !== b.groupId) return a.groupId - b.groupId;
-    return (a.datetime || '').localeCompare(b.datetime || '');
+  const all = getSortedPhotos();
+
+  // グループIDごとにまとめ、グループ内はスコア降順
+  const groupMap = {{}};
+  all.forEach(p => {{
+    if (!groupMap[p.groupId]) groupMap[p.groupId] = [];
+    groupMap[p.groupId].push(p);
   }});
+  Object.values(groupMap).forEach(arr =>
+    arr.sort((a, b) => b.compositeScore - a.compositeScore)
+  );
+
+  // グループ番号昇順でフラット化
+  const sortedGroupIds = Object.keys(groupMap).map(Number).sort((a, b) => a - b);
+  const grouped = [];
+  sortedGroupIds.forEach(gid => grouped.push(...groupMap[gid]));
   lbPhotos = grouped;
 
-  // Precompute group sizes
-  const groupSizes = {{}};
-  grouped.forEach(p => {{ groupSizes[p.groupId] = (groupSizes[p.groupId] || 0) + 1; }});
+  // ベストカット（各グループの先頭）を記録
+  const bestInGroup = new Set();
+  sortedGroupIds.forEach(gid => {{
+    if (groupMap[gid].length > 0) bestInGroup.add(groupMap[gid][0].filename);
+  }});
 
   const container = document.getElementById('grid');
   container.innerHTML = '';
@@ -626,15 +796,17 @@ function renderGroups() {{
   grouped.forEach(p => {{
     if (p.groupId !== curGroupId) {{
       curGroupId = p.groupId;
+      const cnt = groupMap[curGroupId].length;
 
       const section = document.createElement('div');
       section.className = 'group-section';
 
       const header = document.createElement('div');
       header.className = 'group-header';
+      const firstDt = groupMap[curGroupId].slice().sort((a,b)=>(a.datetime||'').localeCompare(b.datetime||''))[0];
       header.innerHTML = '<span>グループ ' + curGroupId + '</span>'
-        + (p.datetime ? '<span class="g-dt">' + fmtDt(p.datetime) + '</span>' : '')
-        + '<span class="g-cnt">' + groupSizes[curGroupId] + '枚</span>';
+        + (firstDt && firstDt.datetime ? '<span class="g-dt">' + fmtDt(firstDt.datetime) + '</span>' : '')
+        + '<span class="g-cnt">' + cnt + '枚</span>';
       section.appendChild(header);
 
       curInner = document.createElement('div');
@@ -642,7 +814,14 @@ function renderGroups() {{
       section.appendChild(curInner);
       container.appendChild(section);
     }}
-    curInner.appendChild(buildCardEl(p));
+    const card = buildCardEl(p);
+    if (bestInGroup.has(p.filename)) {{
+      const badge = document.createElement('div');
+      badge.className = 'best-badge';
+      badge.textContent = '◎ BEST';
+      card.appendChild(badge);
+    }}
+    curInner.appendChild(card);
   }});
 }}
 
@@ -840,6 +1019,10 @@ def main() -> None:
     print(f"  対象: {len(photos)} 枚", file=sys.stderr)
 
     generate_images(jpegs, jpeg_dir, out_dir)
+
+    if args.group_mode == 'clip':
+        print("  CLIPグルーピングを実行中...", file=sys.stderr)
+        reassign_groups_clip(photos, out_dir / 'thumbs')
 
     storage_key         = f"delivery_{out_dir.name}_selections"
     storage_key_ratings = f"asa-delivery-ratings-{out_dir.name}"
