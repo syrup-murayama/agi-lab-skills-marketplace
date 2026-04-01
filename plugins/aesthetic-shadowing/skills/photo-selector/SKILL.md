@@ -462,6 +462,21 @@ cp "$jpeg_dir"/*.xmp "$raw_dir/"
 
 これにより `.ARW` と同名の `.xmp` が RAW フォルダに作成され、Lightroom で自動適用される。
 
+> **xmp_dir と jpeg_dir の役割の違い（重要）**
+> - `xmp_dir`（= `$OUTPUT_DIR/xmp`）: Stage1 技術フィルタリング結果の中間出力先。Stage1〜2 でのみ使用する。
+> - 最終的な XMP サイドカー（Lightroom 用）は `jpeg_dir` 内に生成される。Step 7 でコピーするのは `jpeg_dir/*.xmp`。
+> - `xmp_dir/*.xmp` を Lightroom に渡そうとしてはならない。
+
+> **exiftool で XMP サイドカーを手動生成する場合（緊急時のみ）**
+> ```bash
+> # 正しい書き方 — %f.xmp でファイル名をステムにマッピングする
+> exiftool -ext JPG -o "$raw_dir/%f.xmp" "$jpeg_dir"
+>
+> # 誤った書き方（ディレクトリだけ指定すると JPEG がコピーされる）
+> # exiftool -ext JPG -o "$raw_dir/" "$jpeg_dir"  ← NG
+> ```
+> 通常は xmp_writer.py に任せること。
+
 ---
 
 ### Step 7: Lightroom 書き出し

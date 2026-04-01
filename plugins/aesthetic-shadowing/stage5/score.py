@@ -95,12 +95,12 @@ def cosine_to_score(cosine: float) -> float:
 def encode_images(model, preprocess, paths: list[Path], device: str):
     """画像リストを正規化済み特徴量テンソルに変換（バッチ平均）"""
     import torch
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     feats = []
     for p in paths:
         try:
-            img = Image.open(p).convert("RGB")
+            img = ImageOps.exif_transpose(Image.open(p)).convert("RGB")
             tensor = preprocess(img).unsqueeze(0).to(device)
             with torch.no_grad():
                 f = model.encode_image(tensor)
@@ -155,7 +155,7 @@ def run_image_mode(
     """画像-画像 CLIP スコアリング"""
     import torch
     import open_clip
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     device = get_device()
     print(f"[Stage5] デバイス: {device}")
@@ -188,7 +188,7 @@ def run_image_mode(
     results = []
     for i, jpeg_path in enumerate(jpeg_files, 1):
         try:
-            img = Image.open(jpeg_path).convert("RGB")
+            img = ImageOps.exif_transpose(Image.open(jpeg_path)).convert("RGB")
             tensor = preprocess(img).unsqueeze(0).to(device)
             with torch.no_grad():
                 img_feat = model.encode_image(tensor)
@@ -252,7 +252,7 @@ def run(
 ) -> None:
     import torch
     import open_clip
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     w_clip, w_high, w_low = weights
 
@@ -319,7 +319,7 @@ def run(
     results = []
     for i, jpeg_path in enumerate(jpeg_files, 1):
         try:
-            image = Image.open(jpeg_path).convert("RGB")
+            image = ImageOps.exif_transpose(Image.open(jpeg_path)).convert("RGB")
             image_tensor = preprocess(image).unsqueeze(0).to(device)
 
             with torch.no_grad():
