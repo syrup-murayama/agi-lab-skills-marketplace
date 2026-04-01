@@ -23,6 +23,7 @@ Delivery Review ツール v2
 
 import argparse
 import csv
+import hashlib
 import html
 import json
 import subprocess
@@ -32,12 +33,37 @@ from pathlib import Path
 
 try:
     from PIL import Image
+    try:
+        from PIL import UnidentifiedImageError
+    except ImportError:
+        UnidentifiedImageError = OSError
 except ImportError:
-    print("ERROR: Pillowがインストールされていません: pip install Pillow", file=sys.stderr)
-    sys.exit(1)
+    Image = None
+    UnidentifiedImageError = OSError
+
+
+DATETIME_FORMAT = '%Y:%m:%d %H:%M:%S'
+TIME_GROUP_WINDOW_SECONDS = 300
+CLIP_TIME_GROUP_WINDOW_SECONDS = 600
+CLIP_SIMILARITY_THRESHOLD = 0.82
+THUMB_MAX_PX = 300
+THUMB_QUALITY = 70
+PREVIEW_MAX_PX = 1500
+PREVIEW_QUALITY = 85
+SELECTION_STORAGE_KEY_PREFIX = "delivery_"
+SELECTION_STORAGE_KEY_SUFFIX = "_selections"
+RATINGS_STORAGE_KEY_PREFIX = "asa-delivery-ratings-"
+AUTH_SESSION_KEY_PREFIX = "auth_"
+LOAD_STATE_JS = 'loadState();'
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
+
+def require_pillow() -> None:
+    if Image is None:
+        print("ERROR: Pillowがインストールされていません: pip install Pillow", file=sys.stderr)
+        sys.exit(1)
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -83,41 +109,61 @@ def fetch_exif_data(jpegs: list[Path]) -> dict:
         # exiftool returns 1 when some files had minor issues — still parse output
         data = json.loads(result.stdout)
         return {Path(item['SourceFile']).name: item for item in data}
-    except (FileNotFoundError, json.JSONDecodeError, Exception):
+    except FileNotFoundError:
+        print("WARNING: exiftool が見つかりません。EXIF情報なしで続行します。", file=sys.stderr)
+        return {}
+    except json.JSONDecodeError as exc:
+        print(f"WARNING: exiftool のJSON出力を解析できません: {exc}", file=sys.stderr)
+        return {}
+    except Exception:
         return {}
 
 
 # ─── グルーピング ─────────────────────────────────────────────────────────────
 
-def assign_groups(photos: list[dict]) -> None:
-    """DateTimeOriginal を元に 5 分以内の連続ショットを同一 group_id として付与"""
-    FMT = '%Y:%m:%d %H:%M:%S'
-
+def _build_time_groups(photos: list[dict], window_seconds: int) -> dict[int, list[int]]:
+    """photos の datetime_str を使い、window_seconds 以内を同一グループとする。
+    Returns: {tg_id: [photo_index, ...]}
+    """
     dated: list[tuple[int, datetime]] = []
-    for i, p in enumerate(photos):
-        dt_str = p.get('datetime_str', '')
-        if dt_str:
-            try:
-                dated.append((i, datetime.strptime(dt_str, FMT)))
-            except ValueError:
-                pass
+    for i, photo in enumerate(photos):
+        dt_str = photo.get('datetime_str', '')
+        if not dt_str:
+            continue
+        try:
+            dated.append((i, datetime.strptime(dt_str, DATETIME_FORMAT)))
+        except ValueError:
+            continue
 
-    dated.sort(key=lambda x: x[1])
+    dated.sort(key=lambda item: item[1])
 
+    groups: dict[int, list[int]] = {}
     group_id = 0
     prev_dt: datetime | None = None
-    for i, dt in dated:
-        if prev_dt is None or (dt - prev_dt).total_seconds() > 300:
+    assigned_indices: set[int] = set()
+
+    for photo_index, dt in dated:
+        if prev_dt is None or (dt - prev_dt).total_seconds() > window_seconds:
             group_id += 1
-        photos[i]['group_id'] = group_id
+            groups[group_id] = []
+        groups[group_id].append(photo_index)
+        assigned_indices.add(photo_index)
         prev_dt = dt
 
-    # datetime なし → 個別グループ
-    next_group = group_id + 1
-    for p in photos:
-        if 'group_id' not in p:
-            p['group_id'] = next_group
-            next_group += 1
+    for photo_index in range(len(photos)):
+        if photo_index in assigned_indices:
+            continue
+        group_id += 1
+        groups[group_id] = [photo_index]
+
+    return groups
+
+
+def assign_groups(photos: list[dict]) -> None:
+    """DateTimeOriginal を元に 5 分以内の連続ショットを同一 group_id として付与"""
+    for group_id, indices in _build_time_groups(photos, TIME_GROUP_WINDOW_SECONDS).items():
+        for index in indices:
+            photos[index]['group_id'] = group_id
 
 
 # ─── CLIPグルーピング ─────────────────────────────────────────────────────────
@@ -167,40 +213,10 @@ def reassign_groups_clip(photos: list[dict], thumbs_dir: Path) -> None:
     print(f"\r  CLIP埋め込み完了: {len(embeddings)} 枚              ", file=sys.stderr)
 
     # ─ 時間ウィンドウ10分で仮グループ作成
-    FMT = '%Y:%m:%d %H:%M:%S'
-    dated: list[tuple[int, datetime]] = []
-    for i, p in enumerate(photos):
-        dt_str = p.get('datetime_str', '')
-        if dt_str:
-            try:
-                dated.append((i, datetime.strptime(dt_str, FMT)))
-            except ValueError:
-                pass
-    dated.sort(key=lambda x: x[1])
-
-    time_group: dict[int, int] = {}
-    tg_id = 0
-    prev_dt_clip: datetime | None = None
-    for idx, dt in dated:
-        if prev_dt_clip is None or (dt - prev_dt_clip).total_seconds() > 600:
-            tg_id += 1
-        time_group[idx] = tg_id
-        prev_dt_clip = dt
-    next_tg = tg_id + 1
-    for i in range(len(photos)):
-        if i not in time_group:
-            time_group[i] = next_tg
-            next_tg += 1
-
-    # ─ 時間グループ → dict[tg_id, list[photo_index]]
-    from collections import defaultdict
-    tg_map: dict[int, list[int]] = defaultdict(list)
-    for idx, tg in time_group.items():
-        tg_map[tg].append(idx)
+    tg_map = _build_time_groups(photos, CLIP_TIME_GROUP_WINDOW_SECONDS)
 
     # ─ 各時間グループ内で CLIP greedy clustering (閾値 0.82)
     import torch as _torch  # already imported above, alias for clarity
-    THRESHOLD = 0.82
     global_group_id = 0
     for tg in sorted(tg_map.keys()):
         indices = tg_map[tg]
@@ -219,7 +235,7 @@ def reassign_groups_clip(photos: list[dict], thumbs_dir: Path) -> None:
             assigned = False
             for ci, rep_emb in enumerate(cluster_reps):
                 sim = float(_torch.dot(emb, rep_emb))
-                if sim >= THRESHOLD:
+                if sim >= CLIP_SIMILARITY_THRESHOLD:
                     clusters[ci].append(idx)
                     assigned = True
                     break
@@ -300,9 +316,13 @@ def make_resized(src: Path, dst: Path, max_px: int, quality: int) -> None:
     """既存ファイルはスキップ、新規のみリサイズ保存する"""
     if dst.exists():
         return
-    with Image.open(src) as img:
-        img.thumbnail((max_px, max_px), Image.LANCZOS)
-        img.convert('RGB').save(dst, 'JPEG', quality=quality, optimize=True)
+    require_pillow()
+    try:
+        with Image.open(src) as img:
+            img.thumbnail((max_px, max_px), Image.LANCZOS)
+            img.convert('RGB').save(dst, 'JPEG', quality=quality, optimize=True)
+    except (OSError, UnidentifiedImageError) as exc:
+        print(f"WARNING: 画像をリサイズできないためスキップします: {src} ({exc})", file=sys.stderr)
 
 
 def generate_images(jpegs: list[Path], jpeg_dir: Path, out_dir: Path) -> None:
@@ -314,8 +334,8 @@ def generate_images(jpegs: list[Path], jpeg_dir: Path, out_dir: Path) -> None:
     total = len(jpegs)
     for i, src in enumerate(jpegs, 1):
         stem = src.stem
-        make_resized(src, thumbs_dir  / (stem + '.jpg'), 300,  70)
-        make_resized(src, preview_dir / (stem + '.jpg'), 1500, 85)
+        make_resized(src, thumbs_dir  / (stem + '.jpg'), THUMB_MAX_PX, THUMB_QUALITY)
+        make_resized(src, preview_dir / (stem + '.jpg'), PREVIEW_MAX_PX, PREVIEW_QUALITY)
         if i % 20 == 0 or i == total:
             print(f"\r  画像生成中: {i}/{total}", end='', file=sys.stderr, flush=True)
     print(f"\r  完了: thumbs/preview を {total} 枚生成            ", file=sys.stderr)
@@ -324,7 +344,6 @@ def generate_images(jpegs: list[Path], jpeg_dir: Path, out_dir: Path) -> None:
 # ─── HTML生成 ─────────────────────────────────────────────────────────────────
 
 def sha256_hex(text: str) -> str:
-    import hashlib
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
@@ -370,7 +389,7 @@ def generate_html(photos: list[dict], client: str, email: str, target: int,
         )
         auth_js = (
             f'const AUTH_HASH = "{password_hash}";\n'
-            f'const AUTH_SKEY = "auth_{storage_key}";\n'
+            f'const AUTH_SKEY = "{AUTH_SESSION_KEY_PREFIX}{storage_key}";\n'
             'async function checkAuth() {\n'
             '  const pw = document.getElementById("auth-pw").value;\n'
             '  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pw));\n'
@@ -389,7 +408,7 @@ def generate_html(photos: list[dict], client: str, email: str, target: int,
         )
     else:
         auth_overlay_html = ''
-        auth_js = 'loadState();'
+        auth_js = LOAD_STATE_JS
 
     return f'''\
 <!DOCTYPE html>
@@ -1070,8 +1089,8 @@ def main() -> None:
         print("  CLIPグルーピングを実行中...", file=sys.stderr)
         reassign_groups_clip(photos, out_dir / 'thumbs')
 
-    storage_key         = f"delivery_{out_dir.name}_selections"
-    storage_key_ratings = f"asa-delivery-ratings-{out_dir.name}"
+    storage_key = f"{SELECTION_STORAGE_KEY_PREFIX}{out_dir.name}{SELECTION_STORAGE_KEY_SUFFIX}"
+    storage_key_ratings = f"{RATINGS_STORAGE_KEY_PREFIX}{out_dir.name}"
 
     pw_hash = sha256_hex(args.password) if args.password else ""
     html_content = generate_html(

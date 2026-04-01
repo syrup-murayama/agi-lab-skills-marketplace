@@ -53,6 +53,11 @@ LEARNING_WEIGHTS = {
     1: 1.0,   # 確実な不採用例
 }
 
+# 自動サンプル選定用の定数
+AUTO_SAMPLES_MIN = 20
+AUTO_SAMPLES_MAX = 50
+AUTO_SAMPLES_RATIO = 0.1
+
 HTML_TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="ja">
@@ -503,7 +508,15 @@ def load_shots(csv_path: Path) -> dict[int, list[ShotRecord]]:
 # ---- インポートレーティング ----
 
 def _parse_rating_map(mapping_str: str) -> dict[int, int]:
-    """'1:2,2:3,3:5' -> {1:2, 2:3, 3:5}。空文字なら空dictを返す。"""
+    """
+    '1:2,2:3,3:5' 形式の文字列を辞書に変換する。
+
+    Args:
+        mapping_str: '変換前:変換後' をカンマ区切りで並べた文字列
+
+    Returns:
+        int から int への変換マップ
+    """
     if not mapping_str:
         return {}
     result = {}
@@ -523,7 +536,16 @@ def _remap(rating: int, rating_map: dict[int, int]) -> int:
 
 
 def _load_ratings_csv(csv_path: Path, rating_map: dict[int, int]) -> dict[str, int]:
-    """CSV からレーティングを読み込む。戻り値は {ファイル名stem: 1-5}。"""
+    """
+    CSVファイルからレーティング情報を読み込む。
+
+    Args:
+        csv_path: 入力CSVファイルのパス
+        rating_map: レーティング値の変換マップ
+
+    Returns:
+        ファイル名の stem をキー、1-5 のレーティングを値とする辞書
+    """
     ratings: dict[str, int] = {}
     with open(csv_path, encoding="utf-8", newline="") as f:
         reader = _csv.DictReader(f)
@@ -563,7 +585,16 @@ def _load_ratings_csv(csv_path: Path, rating_map: dict[int, int]) -> dict[str, i
 
 
 def _load_ratings_xmp(xmp_dir: Path, rating_map: dict[int, int]) -> dict[str, int]:
-    """XMP ディレクトリから XMP:Rating を読み取る。戻り値は {ファイル名stem: 1-5}。"""
+    """
+    ディレクトリ内のXMPファイルから XMP:Rating を一括取得する。
+
+    Args:
+        xmp_dir: XMPファイルが格納されているディレクトリ
+        rating_map: レーティング値の変換マップ
+
+    Returns:
+        ファイル名の stem をキー、1-5 のレーティングを値とする辞書
+    """
     ratings: dict[str, int] = {}
     xmp_files = list(xmp_dir.glob("*.xmp")) + list(xmp_dir.glob("*.XMP"))
     if not xmp_files:
@@ -587,7 +618,16 @@ def _load_ratings_xmp(xmp_dir: Path, rating_map: dict[int, int]) -> dict[str, in
 
 
 def load_import_ratings(import_path: Path, rating_map: dict[int, int]) -> dict[str, int]:
-    """指定した CSV または XMP ディレクトリからレーティングを読み込む。"""
+    """
+    指定されたパス（CSVファイルまたはXMPディレクトリ）からレーティングをインポートする。
+
+    Args:
+        import_path: CSVファイルまたはディレクトリのパス
+        rating_map: レーティング値の変換マップ
+
+    Returns:
+        ファイル名の stem をキー、1-5 のレーティングを値とする辞書
+    """
     if import_path.is_dir():
         return _load_ratings_xmp(import_path, rating_map)
     if import_path.suffix.lower() == ".csv":
@@ -601,7 +641,18 @@ def build_prefilled_samples(
     imported: dict[str, int],
     camera_ratings: dict[str, int],
 ) -> tuple[list[SampleEntry], set[int]]:
-    """インポート済みレーティングをグループ単位で SampleEntry 化する。"""
+    """
+    インポート済みレーティングをグループ単位で集計し、SampleEntry のリストを作成する。
+
+    Args:
+        by_group: グループIDをキーとしたショット記録の辞書
+        imported: 外部ファイルからインポートされたレーティング (stem -> 1-5)
+        camera_ratings: カメラ内レーティング (stem -> 1-5)
+
+    Returns:
+        (確定済みサンプルのリスト, カバーされたグループIDのセット)
+    """
+    # 外部インポート (imported) を優先し、カメラレーティングで補完する
     merged = {**camera_ratings, **imported}
     pre_filled: list[SampleEntry] = []
     covered: set[int] = set()
@@ -631,6 +682,7 @@ def build_prefilled_samples(
             covered.add(gid)
 
     return pre_filled, covered
+
 
 
 # ブレ絶対失敗の閾値（グループ内相対スコアがこれ未満 = 明らかな失敗カット）
@@ -1001,6 +1053,49 @@ def run_browser_session(
     print(f"結果: {output_path}")
 
 
+def _apply_import_ratings(
+    args: argparse.Namespace,
+    by_group: dict[int, list[ShotRecord]],
+    jpeg_dir: Path
+) -> tuple[list[SampleEntry], set[int]]:
+    """
+    カメラレーティングおよび外部インポートレーティングを適用し、
+    既に評価済みのグループを特定する。
+    """
+    # 1. カメラ内レーティングの収集
+    camera_ratings: dict[str, int] = {}
+    for members in by_group.values():
+        for shot in members:
+            if shot.camera_rating > 0:
+                camera_ratings[Path(shot.file).stem] = shot.camera_rating
+    if camera_ratings:
+        print(f"カメラレーティング: {len(camera_ratings)} 件を検出")
+
+    # 2. 外部ファイルのインポート
+    imported: dict[str, int] = {}
+    if args.import_ratings:
+        import_path = Path(args.import_ratings)
+        if not import_path.is_absolute():
+            import_path = jpeg_dir.parent / import_path
+        if not import_path.exists():
+            print(f"エラー: --import-ratings が見つかりません: {import_path}", file=sys.stderr)
+            sys.exit(1)
+        rating_map_dict = _parse_rating_map(args.rating_map)
+        imported = load_import_ratings(import_path, rating_map_dict)
+        print(f"[import-ratings] {len(imported)} 件をインポート")
+
+    # 3. マージとグループ適用
+    if not imported and not camera_ratings:
+        return [], set()
+
+    pre_filled, covered_group_ids = build_prefilled_samples(by_group, imported, camera_ratings)
+    print(
+        f"カバー済みグループ: {len(covered_group_ids)} / {len(by_group)} "
+        f"({len(pre_filled)} 枚がインポートで確定)"
+    )
+    return pre_filled, covered_group_ids
+
+
 # ---- エントリポイント ----
 
 def main() -> None:
@@ -1051,40 +1146,15 @@ def main() -> None:
     total_shots = sum(len(m) for m in by_group.values())
     print(f"CSV 読み込み: {total_shots}枚 / {len(by_group)}グループ")
 
-    camera_ratings: dict[str, int] = {}
-    for members in by_group.values():
-        for shot in members:
-            if shot.camera_rating > 0:
-                camera_ratings[Path(shot.file).stem] = shot.camera_rating
-    if camera_ratings:
-        print(f"カメラレーティング: {len(camera_ratings)} 件を検出")
-
-    imported: dict[str, int] = {}
-    if args.import_ratings:
-        import_path = Path(args.import_ratings)
-        if not import_path.is_absolute():
-            import_path = jpeg_dir.parent / import_path
-        if not import_path.exists():
-            print(f"エラー: --import-ratings が見つかりません: {import_path}", file=sys.stderr)
-            sys.exit(1)
-        rating_map_dict = _parse_rating_map(args.rating_map)
-        imported = load_import_ratings(import_path, rating_map_dict)
-        print(f"[import-ratings] {len(imported)} 件をインポート")
-
-    pre_filled: list[SampleEntry] = []
-    covered_group_ids: set[int] = set()
-    if imported or camera_ratings:
-        pre_filled, covered_group_ids = build_prefilled_samples(by_group, imported, camera_ratings)
-        print(
-            f"カバー済みグループ: {len(covered_group_ids)} / {len(by_group)} "
-            f"({len(pre_filled)} 枚がインポートで確定)"
-        )
+    # インポートレーティングの適用
+    pre_filled, covered_group_ids = _apply_import_ratings(args, by_group, jpeg_dir)
 
     # --samples の解決: "auto" or 整数
     if args.samples == "auto":
         n_groups = len(by_group)
-        n_samples = max(20, min(50, round(n_groups * 0.1)))
-        print(f"サンプル数自動算出: {n_samples}枚（グループ数 {n_groups} の10%、20〜50枚でクランプ）")
+        n_samples = max(AUTO_SAMPLES_MIN, min(AUTO_SAMPLES_MAX, round(n_groups * AUTO_SAMPLES_RATIO)))
+        print(f"サンプル数自動算出: {n_samples}枚（グループ数 {n_groups} の"
+              f"{int(AUTO_SAMPLES_RATIO * 100)}%、{AUTO_SAMPLES_MIN}〜{AUTO_SAMPLES_MAX}枚でクランプ）")
     else:
         try:
             n_samples = int(args.samples)

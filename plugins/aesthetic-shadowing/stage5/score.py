@@ -43,6 +43,8 @@ from pathlib import Path
 # ---- デフォルト設定 ----
 DEFAULT_THRESHOLDS = [0.25, 0.45, 0.60, 0.75]
 DEFAULT_WEIGHTS = [0.5, 0.3, 0.2]  # clip, high, low
+DEFAULT_MODEL = "ViT-B-32"
+DEFAULT_PRETRAINED = "openai"
 
 JPEG_EXTENSIONS = {".jpg", ".jpeg", ".JPG", ".JPEG"}
 
@@ -151,6 +153,8 @@ def run_image_mode(
     thresholds: list[float],
     normalize: bool,
     verbose: bool,
+    model_name: str = DEFAULT_MODEL,
+    pretrained: str = DEFAULT_PRETRAINED,
 ) -> None:
     """画像-画像 CLIP スコアリング"""
     import torch
@@ -159,10 +163,10 @@ def run_image_mode(
 
     device = get_device()
     print(f"[Stage5] デバイス: {device}")
-    print("[Stage5] CLIPモデル (ViT-B-32 / openai) をロード中...")
+    print(f"[Stage5] モデルロード中: {model_name} / {pretrained}")
 
     model, _, preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-32", pretrained="openai"
+        model_name, pretrained=pretrained
     )
     model = model.to(device)
     model.eval()
@@ -249,6 +253,8 @@ def run(
     use_composite: bool,
     normalize: bool,
     verbose: bool,
+    model_name: str = DEFAULT_MODEL,
+    pretrained: str = DEFAULT_PRETRAINED,
 ) -> None:
     import torch
     import open_clip
@@ -290,14 +296,14 @@ def run(
     # ---- CLIP モデルロード ----
     device = get_device()
     print(f"[Stage5] デバイス: {device}")
-    print("[Stage5] CLIPモデル (ViT-B-32 / openai) をロード中...")
+    print(f"[Stage5] モデルロード中: {model_name} / {pretrained}")
 
     model, _, preprocess = open_clip.create_model_and_transforms(
-        "ViT-B-32", pretrained="openai"
+        model_name, pretrained=pretrained
     )
     model = model.to(device)
     model.eval()
-    tokenizer = open_clip.get_tokenizer("ViT-B-32")
+    tokenizer = open_clip.get_tokenizer(model_name)
 
     # テキスト特徴量を事前計算
     clip_feat = encode_texts(model, tokenizer, queries, device)
@@ -456,6 +462,10 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="全ファイルのスコアを表示")
     parser.add_argument("--demo", action="store_true",
                         help="デモモード: CLIPモデルのロードをスキップしサンプルスコアを生成する")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help="CLIPモデル名 (例: ViT-B-32, ViT-B-16-SigLIP)")
+    parser.add_argument("--pretrained", default=DEFAULT_PRETRAINED,
+                        help="事前学習済み重み名 (例: openai, webli)")
     args = parser.parse_args()
 
     # jpeg_dir: 位置引数優先、次に --jpeg-dir
@@ -524,6 +534,8 @@ def main() -> None:
             thresholds,
             normalize=not args.no_normalize,
             verbose=args.verbose,
+            model_name=args.model,
+            pretrained=args.pretrained,
         )
     else:
         run(
@@ -535,6 +547,8 @@ def main() -> None:
             use_composite=not args.no_composite,
             normalize=not args.no_normalize,
             verbose=args.verbose,
+            model_name=args.model,
+            pretrained=args.pretrained,
         )
 
 
