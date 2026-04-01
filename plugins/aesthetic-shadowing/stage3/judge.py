@@ -441,6 +441,7 @@ class ShotRecord:
     technical_score: float  # 0.0〜1.0（新CSVのみ）
     sharpness_score: float  # 0.0〜1.0 グループ内相対シャープネス
     has_technical: bool     # technical_scoreフィールドが存在したか
+    camera_rating: int = 0  # stage2_groups.csv の camera_rating
 
 
 @dataclass
@@ -488,6 +489,7 @@ def load_shots(csv_path: Path) -> dict[int, list[ShotRecord]]:
                 technical_score=tech,
                 sharpness_score=sharp,
                 has_technical=has_technical,
+                camera_rating=int(row.get("camera_rating", 0) or 0),
             ))
 
     # 各グループを position 優先でソート: first → solo → last → middle
@@ -496,6 +498,139 @@ def load_shots(csv_path: Path) -> dict[int, list[ShotRecord]]:
         members.sort(key=lambda s: (_pos_order.get(s.position, 3), s.file))
 
     return by_group
+
+
+# ---- インポートレーティング ----
+
+def _parse_rating_map(mapping_str: str) -> dict[int, int]:
+    """'1:2,2:3,3:5' -> {1:2, 2:3, 3:5}。空文字なら空dictを返す。"""
+    if not mapping_str:
+        return {}
+    result = {}
+    for pair in mapping_str.split(","):
+        if ":" not in pair:
+            continue
+        src, dst = pair.split(":", 1)
+        try:
+            result[int(src.strip())] = int(dst.strip())
+        except ValueError:
+            pass
+    return result
+
+
+def _remap(rating: int, rating_map: dict[int, int]) -> int:
+    return rating_map.get(rating, rating)
+
+
+def _load_ratings_csv(csv_path: Path, rating_map: dict[int, int]) -> dict[str, int]:
+    """CSV からレーティングを読み込む。戻り値は {ファイル名stem: 1-5}。"""
+    ratings: dict[str, int] = {}
+    with open(csv_path, encoding="utf-8", newline="") as f:
+        reader = _csv.DictReader(f)
+        headers_lower = [h.lower() for h in (reader.fieldnames or [])]
+        orig_headers = list(reader.fieldnames or [])
+
+        name_col = None
+        for candidate in ["filename", "file", "name", "ファイル名"]:
+            if candidate in headers_lower:
+                name_col = orig_headers[headers_lower.index(candidate)]
+                break
+
+        rating_col = None
+        for candidate in ["rating", "star_rating", "stars", "camera_rating", "レーティング"]:
+            if candidate in headers_lower:
+                rating_col = orig_headers[headers_lower.index(candidate)]
+                break
+
+        if not name_col or not rating_col:
+            print(f"[import-ratings] 列を検出できませんでした: {reader.fieldnames}", file=sys.stderr)
+            return ratings
+
+        for row in reader:
+            fname = (row.get(name_col) or "").strip()
+            if not fname:
+                continue
+            stem = Path(fname).stem
+            try:
+                raw = int(row.get(rating_col) or 0)
+            except ValueError:
+                continue
+            if raw <= 0:
+                continue
+            ratings[stem] = max(1, min(5, _remap(raw, rating_map)))
+
+    return ratings
+
+
+def _load_ratings_xmp(xmp_dir: Path, rating_map: dict[int, int]) -> dict[str, int]:
+    """XMP ディレクトリから XMP:Rating を読み取る。戻り値は {ファイル名stem: 1-5}。"""
+    ratings: dict[str, int] = {}
+    xmp_files = list(xmp_dir.glob("*.xmp")) + list(xmp_dir.glob("*.XMP"))
+    if not xmp_files:
+        print(f"[import-ratings] XMP ファイルなし: {xmp_dir}", file=sys.stderr)
+        return ratings
+    try:
+        result = subprocess.run(
+            ["exiftool", "-j", "-XMP:Rating"] + [str(f) for f in xmp_files],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        for item in json.loads(result.stdout):
+            stem = Path(item.get("SourceFile", "")).stem
+            raw = int(item.get("Rating") or 0)
+            if raw > 0:
+                ratings[stem] = max(1, min(5, _remap(raw, rating_map)))
+    except Exception as e:
+        print(f"[import-ratings] XMP 読み取りエラー: {e}", file=sys.stderr)
+    return ratings
+
+
+def load_import_ratings(import_path: Path, rating_map: dict[int, int]) -> dict[str, int]:
+    """指定した CSV または XMP ディレクトリからレーティングを読み込む。"""
+    if import_path.is_dir():
+        return _load_ratings_xmp(import_path, rating_map)
+    if import_path.suffix.lower() == ".csv":
+        return _load_ratings_csv(import_path, rating_map)
+    print(f"[import-ratings] 未対応の形式: {import_path}", file=sys.stderr)
+    return {}
+
+
+def build_prefilled_samples(
+    by_group: dict[int, list[ShotRecord]],
+    imported: dict[str, int],
+    camera_ratings: dict[str, int],
+) -> tuple[list[SampleEntry], set[int]]:
+    """インポート済みレーティングをグループ単位で SampleEntry 化する。"""
+    merged = {**camera_ratings, **imported}
+    pre_filled: list[SampleEntry] = []
+    covered: set[int] = set()
+
+    for gid, members in sorted(by_group.items()):
+        best_file: str | None = None
+        best_rating: int | None = None
+        best_tech = -1.0
+
+        for shot in members:
+            stem = Path(shot.file).stem
+            rating = merged.get(stem) or merged.get(shot.file)
+            if rating and rating > 0:
+                if best_rating is None or shot.technical_score > best_tech:
+                    best_rating = rating
+                    best_file = shot.file
+                    best_tech = shot.technical_score
+
+        if best_rating is not None and best_file is not None:
+            pre_filled.append(SampleEntry(
+                file=best_file,
+                group_id=gid,
+                technical_score=best_tech,
+                human_rating=best_rating,
+                skipped=False,
+            ))
+            covered.add(gid)
+
+    return pre_filled, covered
 
 
 # ブレ絶対失敗の閾値（グループ内相対スコアがこれ未満 = 明らかな失敗カット）
@@ -887,6 +1022,12 @@ def main() -> None:
                         help="HTTPサーバーのポート番号（使用中なら自動インクリメント）")
     parser.add_argument("--lan",      action="store_true",
                         help="LANからのアクセスを許可（0.0.0.0でバインド）")
+    parser.add_argument("--import-ratings", default="",
+                        metavar="PATH",
+                        help="外部レーティングファイルをインポート。CSVまたはXMPディレクトリを指定。カバー済みグループは自動的にブラウザUIをスキップ。")
+    parser.add_argument("--rating-map", default="",
+                        metavar="MAP",
+                        help="レーティングスケール変換マップ（例: '1:2,2:3,3:5'）。省略時はそのまま。")
     args = parser.parse_args()
 
     jpeg_dir = Path(args.jpeg_dir)
@@ -909,6 +1050,35 @@ def main() -> None:
     by_group = load_shots(csv_path)
     total_shots = sum(len(m) for m in by_group.values())
     print(f"CSV 読み込み: {total_shots}枚 / {len(by_group)}グループ")
+
+    camera_ratings: dict[str, int] = {}
+    for members in by_group.values():
+        for shot in members:
+            if shot.camera_rating > 0:
+                camera_ratings[Path(shot.file).stem] = shot.camera_rating
+    if camera_ratings:
+        print(f"カメラレーティング: {len(camera_ratings)} 件を検出")
+
+    imported: dict[str, int] = {}
+    if args.import_ratings:
+        import_path = Path(args.import_ratings)
+        if not import_path.is_absolute():
+            import_path = jpeg_dir.parent / import_path
+        if not import_path.exists():
+            print(f"エラー: --import-ratings が見つかりません: {import_path}", file=sys.stderr)
+            sys.exit(1)
+        rating_map_dict = _parse_rating_map(args.rating_map)
+        imported = load_import_ratings(import_path, rating_map_dict)
+        print(f"[import-ratings] {len(imported)} 件をインポート")
+
+    pre_filled: list[SampleEntry] = []
+    covered_group_ids: set[int] = set()
+    if imported or camera_ratings:
+        pre_filled, covered_group_ids = build_prefilled_samples(by_group, imported, camera_ratings)
+        print(
+            f"カバー済みグループ: {len(covered_group_ids)} / {len(by_group)} "
+            f"({len(pre_filled)} 枚がインポートで確定)"
+        )
 
     # --samples の解決: "auto" or 整数
     if args.samples == "auto":
@@ -945,10 +1115,18 @@ def main() -> None:
         print(f"前回セッション復元: {completed}/{len(samples)} 完了")
     else:
         created_at = datetime.now().isoformat()
-        samples = select_samples(by_group, n_samples, jpeg_dir)
-        print(f"代表カット選定: {len(samples)}枚 / {len(by_group)}グループから")
+        uncovered_by_group = {
+            gid: members
+            for gid, members in by_group.items()
+            if gid not in covered_group_ids
+        }
+        browser_samples = select_samples(uncovered_by_group, n_samples, jpeg_dir)
+        print(f"代表カット選定: {len(browser_samples)}枚 / {len(uncovered_by_group)}未カバーグループから")
 
-        if not samples:
+        samples = pre_filled + browser_samples
+        print(f"合計サンプル: {len(samples)}枚（内 {len(pre_filled)} 枚インポート確定）")
+
+        if not browser_samples and not pre_filled:
             print("エラー: 有効なJPEGが見つかりません。", file=sys.stderr)
             sys.exit(1)
 
