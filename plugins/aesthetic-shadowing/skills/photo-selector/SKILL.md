@@ -104,23 +104,42 @@ ls /Volumes/<ボリューム名>/DCIM/
 ユーザーの回答に「おまかせ」「任せる」「自動で」「全部やって」などが含まれていれば、
 `mode=auto` として記録する。この場合 Step 2 のダッシュボードを表示せず、Stage3〜6 を自動実行する。
 
-#### 0-4. jpeg_dir と OUTPUT_DIR を確定する（コピー前に設定）
+#### 0-4. パス変数を確定する
 
-ユーザーの回答を受けたら、**コピーを開始する前に** パスを確定する:
+ユーザーの回答を受けたら、**コピーを開始する前に** 全パスを確定する。
 
-- **1日の場合**: `jpeg_dir=~/Downloads/yyyy-mm-dd_JPEG`
-- **期間の場合**: `jpeg_dir=~/Downloads/yyyy-mm-dd_yyyy-mm-dd_JPEG`
+##### パス変数の定義（重要）
 
-ユーザーが別のパスを希望する場合はそちらを優先する。
+| 変数 | 役割 | 例 |
+|---|---|---|
+| `jpeg_dir` | JPEG 作業ディレクトリ（Stage1〜6 の処理対象） | `~/案件/2026-03-31_colorier/JPEG` |
+| `raw_dir` | RAW ファイルディレクトリ（ユーザーが RAW もある場合のみ） | `~/案件/2026-03-31_colorier/RAW` |
+| `OUTPUT_DIR` | 中間ファイル置き場（session.json, CSV, プロファイルなど） | `jpeg_dir` と同じパスにする |
+| `stage1_xmp_dir` | Stage1 技術フィルタの **中間出力**（最終成果物ではない） | `$OUTPUT_DIR/xmp` |
+
+> **`stage1_xmp_dir` は Lightroom に渡す最終 XMP ではない。** Stage1 が除外フラグを書いた中間ファイルで、Stage2 が参照するだけ。最終的な星レーティング XMP は Stage6 が `jpeg_dir` 内に生成し、Step 7 でコピーする。
+
+##### SDカードからコピーする場合（ハッカソン向けフロー）
 
 ```bash
-# パスを確定してディレクトリを作成する
-jpeg_dir=~/Downloads/2026-03-20_JPEG   # 実際の日付に置き換える
+jpeg_dir=~/Downloads/2026-03-20_JPEG
 OUTPUT_DIR="$jpeg_dir"
 mkdir -p "$jpeg_dir"
 ```
 
-**`jpeg_dir` と `OUTPUT_DIR` はここで確定する。以降のすべてのステップでこの値を使う。**
+##### 案件ディレクトリが既にある場合（実務フロー・推奨）
+
+SDカードからのバックアップは手動で完了済みとする。ユーザーが案件ディレクトリのパスを指定したら、そのまま変数に設定する（`rm`, `mv`, `cp` でファイルを移動・削除してはならない）:
+
+```bash
+jpeg_dir=/path/to/案件ディレクトリ/JPEG   # ユーザー指定のパスを使う
+raw_dir=/path/to/案件ディレクトリ/RAW     # RAW がある場合のみ
+OUTPUT_DIR="$jpeg_dir"
+stage1_xmp_dir="$OUTPUT_DIR/xmp"
+mkdir -p "$stage1_xmp_dir"
+```
+
+**`jpeg_dir`, `raw_dir`, `OUTPUT_DIR`, `stage1_xmp_dir` はここで確定する。以降のすべてのステップでこの値を使う。**
 
 #### 0-5. コピー実行（フォアグラウンド）
 
@@ -195,16 +214,13 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage1/analyze.py --help
 ```
 
-第2引数 `<xmp_dir>` は XMP サイドカーの書き出し先。`$OUTPUT_DIR/xmp` を使う（`/tmp/` は使わない）。
-詳細 CSV は `<xmp_dir>/stage1_results.csv` に自動保存される。
+第2引数 `<xmp_dir>` は Stage1 の中間出力先（`stage1_xmp_dir`）。詳細 CSV は `<stage1_xmp_dir>/stage1_results.csv` に自動保存される。
 
 ```bash
-xmp_dir="$OUTPUT_DIR/xmp"
-mkdir -p "$xmp_dir"
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage1/analyze.py \
   "$jpeg_dir" \
-  "$xmp_dir"
+  "$stage1_xmp_dir"
 ```
 
 実行後、除外枚数をユーザーに報告する。除外率が異常に高い（>50%）場合は閾値を確認する。
@@ -220,13 +236,15 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   ${CLAUDE_PLUGIN_ROOT}/../../stage2/group.py \
   "$jpeg_dir" \
-  --xmp-dir "$xmp_dir" \
+  --xmp-dir "$stage1_xmp_dir" \
   --output "$OUTPUT_DIR/stage2_groups.csv"
 ```
 
 `--help` でオプションを確認すること。出力CSVのグループ数・SOLO枚数をユーザーに報告する。
 
-完了後、Stage2 ダッシュボードを起動する:
+> **`group.py` は manual・auto どちらのモードでも必ず実行する。**
+
+**mode=manual（デフォルト）の場合のみ** ダッシュボードを起動する:
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
@@ -235,10 +253,6 @@ ${CLAUDE_PLUGIN_ROOT}/../../stage1/.venv/bin/python \
   --groups-csv "$OUTPUT_DIR/stage2_groups.csv" \
   --serve
 ```
-
-**mode=auto（おまかせ）の場合はこのステップ全体をスキップして Step 3 へ直行する。**
-
-mode=manual（デフォルト）の場合のみ以下を実行する:
 
 ダッシュボードが起動したら、ユーザーにこう伝えて **ユーザーの返答を待つ**:
 
@@ -249,9 +263,11 @@ mode=manual（デフォルト）の場合のみ以下を実行する:
 **重要: ここでユーザーの返答を受け取るまで Step 3 へ進んではならない。**
 `--serve` モードはプロセスが起動し続けるため、ユーザーがダッシュボードを操作している間は待機する。
 
+**mode=auto（おまかせ）の場合** はダッシュボードを起動せず、そのまま Step 3 へ進む。
+
 ---
 
-### [分岐] ダッシュボード確認後の選択
+### [分岐] ダッシュボード確認後の選択（manual モードのみ）
 
 **ユーザーの返答を待ってから** 次のステップを決める:
 
@@ -262,10 +278,12 @@ mode=manual（デフォルト）の場合のみ以下を実行する:
 
 ---
 
-### Step 3: 審美眼サンプリング（おまかせモード専用）
+### Step 3: 審美眼サンプリング
 
-**このステップは「おまかせモード」を選んだ場合のみ実行する。**
-ユーザーがダッシュボードで手動セレクトした場合は Step 7 へ直行する。
+**このステップは manual・auto どちらのモードでも実行する。**
+唯一の例外: ユーザーがダッシュボードで手動セレクトを完了した場合（「できた」「書き出した」など）は Step 7 へ直行する。
+
+> **judge.py を実行する理由**: 人間の審美眼サンプルがなければ Stage5 CLIP の学習アンカーが存在せず、スコアリングが全員同点になる。おまかせモードこそ、judge.py による代表カットのサンプリングが不可欠。
 
 #### 既存データの確認（重要）
 
@@ -462,10 +480,9 @@ cp "$jpeg_dir"/*.xmp "$raw_dir/"
 
 これにより `.ARW` と同名の `.xmp` が RAW フォルダに作成され、Lightroom で自動適用される。
 
-> **xmp_dir と jpeg_dir の役割の違い（重要）**
-> - `xmp_dir`（= `$OUTPUT_DIR/xmp`）: Stage1 技術フィルタリング結果の中間出力先。Stage1〜2 でのみ使用する。
+> **`stage1_xmp_dir` と最終 XMP の違い（重要）**
+> - `stage1_xmp_dir`（= `$OUTPUT_DIR/xmp`）: Stage1 技術フィルタリング結果の**中間出力**。Stage1〜2 でのみ使用する。Lightroom には渡さない。
 > - 最終的な XMP サイドカー（Lightroom 用）は `jpeg_dir` 内に生成される。Step 7 でコピーするのは `jpeg_dir/*.xmp`。
-> - `xmp_dir/*.xmp` を Lightroom に渡そうとしてはならない。
 
 > **exiftool で XMP サイドカーを手動生成する場合（緊急時のみ）**
 > ```bash
@@ -513,7 +530,7 @@ rsync -av \
 | ファイル | 内容 | 次のStageへの入力 |
 |----------|------|-----------------|
 | `$OUTPUT_DIR/session.json` | セッション情報・撮影意図 | Stage3 |
-| `<xmp_dir>/stage1_results.csv` | 技術フィルタリング結果（xmp_dir に自動保存） | 参照用 |
+| `$stage1_xmp_dir/stage1_results.csv` | 技術フィルタリング結果（中間出力、Lightroom には渡さない） | 参照用 |
 | `$OUTPUT_DIR/stage2_groups.csv` | グループ化・技術スコア付きCSV | Stage3 |
 | `$OUTPUT_DIR/rated_samples.json` | 人間レーティング付きサンプル | Stage4 |
 | `$OUTPUT_DIR/aesthetic_profile.json` | Claude生成の審美眼プロファイル | Stage5 |
