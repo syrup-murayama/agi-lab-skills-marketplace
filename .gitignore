@@ -1,3 +1,4 @@
 .DS_Store
 .env
 DEMO_SCRIPT.md
+.tmp*.mp4

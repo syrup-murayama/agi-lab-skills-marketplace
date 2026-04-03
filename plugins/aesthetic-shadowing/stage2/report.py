@@ -1678,6 +1678,763 @@ if (typeof _initGapVisuals === "function") _initGapVisuals();
 </html>'''
 
 
+def generate_client_html(rows: list[dict], jpeg_dir: Path,
+                          session_info: dict | None = None,
+                          img_base: str = 'file') -> str:
+    """クライアント向け 2nd セレクトツール HTML を生成する。
+
+    機能:
+      - ナチュラル/オーガニック CSS
+      - レーティングフィルタ (=, >, <) / ソート / キーワード検索
+      - サムネイルサイズ調整スライダー
+      - タグ付け / コレクション
+      - クライアントによるレーティング変更
+      - 採用フラグ + リアルタイムカウンター
+      - localStorage 自動保存
+    """
+    sorted_rows = sorted(rows, key=lambda r: (r.get('datetime', ''), r['stem']))
+
+    photos = []
+    for r in sorted_rows:
+        url = find_jpeg(jpeg_dir, r['stem'], img_base)
+        photos.append({
+            'stem': r['stem'],
+            'url':  url,
+            'gid':  r['group_id'],
+            'dt':   (r.get('datetime') or '')[:19],
+            'cr':   r.get('camera_rating', 0),
+        })
+
+    photos_json  = json.dumps(photos, ensure_ascii=False)
+    n_total      = len(photos)
+    title        = html.escape(session_info.get('title', '2nd セレクト') if session_info else '2nd セレクト')
+    sess_date    = html.escape(session_info.get('date',  '')              if session_info else '')
+    preset_tags  = json.dumps(
+        ['お気に入り', 'ヘービー候補', 'SNS向け', 'プリント向け', '要確認', '使わない'],
+        ensure_ascii=False,
+    )
+    sess_date_html = f'<span class="sess-date"> — {sess_date}</span>' if sess_date else ''
+
+    return f'''<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title} — 2nd セレクト</title>
+<style>
+*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "游ゴシック", YuGothic, sans-serif;
+  background: #f8f5f0;
+  color: #3d3530;
+  min-height: 100vh;
+}}
+
+/* ---- Header ---- */
+.header {{
+  position: sticky; top: 0; z-index: 200;
+  background: rgba(255,255,255,0.97);
+  border-bottom: 1px solid #e5ddd5;
+  padding: 14px 20px 10px;
+  box-shadow: 0 2px 16px rgba(61,53,48,0.07);
+  backdrop-filter: blur(8px);
+}}
+.header-top {{
+  display: flex; align-items: center; gap: 14px;
+  margin-bottom: 12px; flex-wrap: wrap;
+}}
+.site-title {{
+  font-size: 1.05rem; font-weight: 700; color: #3d3530;
+  flex: 1; letter-spacing: -0.01em;
+}}
+.site-title .accent {{ color: #7d9b6a; }}
+.sess-date {{ font-size: 0.75rem; color: #a09080; font-weight: 400; }}
+
+.adopt-counter {{
+  display: flex; align-items: baseline; gap: 5px;
+  background: linear-gradient(135deg, #7d9b6a, #6a8a58);
+  color: #fff; padding: 6px 16px; border-radius: 24px;
+  box-shadow: 0 2px 8px rgba(125,155,106,0.35);
+  white-space: nowrap;
+}}
+.adopt-counter .n {{ font-size: 1.35rem; font-weight: 800; line-height: 1; }}
+.adopt-counter .lbl {{ font-size: 0.72rem; opacity: 0.85; }}
+
+/* ---- Controls ---- */
+.controls {{
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}}
+.search-wrap {{ position: relative; }}
+.search-icon {{
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  color: #c0b0a0; font-size: 0.8rem; pointer-events: none;
+}}
+.search-box {{
+  padding: 7px 12px 7px 30px;
+  border: 1.5px solid #ddd5cc; border-radius: 20px;
+  background: #faf8f5; font-size: 0.83rem; color: #3d3530;
+  outline: none; width: 185px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}}
+.search-box:focus {{ border-color: #7d9b6a; box-shadow: 0 0 0 3px rgba(125,155,106,0.12); }}
+.search-box::placeholder {{ color: #c0b0a0; }}
+
+.filter-group {{ display: flex; gap: 6px; align-items: center; }}
+.filter-label {{ font-size: 0.72rem; color: #a09080; white-space: nowrap; }}
+
+select.filter-select, select.sort-select {{
+  padding: 6px 10px; border: 1.5px solid #ddd5cc; border-radius: 8px;
+  background: #faf8f5; font-size: 0.8rem; color: #3d3530;
+  cursor: pointer; outline: none; transition: border-color 0.15s;
+}}
+select.filter-select:focus, select.sort-select:focus {{ border-color: #7d9b6a; }}
+
+.size-row {{ display: flex; align-items: center; gap: 6px; }}
+.size-row span {{ font-size: 0.72rem; color: #a09080; white-space: nowrap; }}
+.size-slider {{
+  -webkit-appearance: none; appearance: none;
+  width: 80px; height: 4px; border-radius: 2px;
+  background: #d8d0c8; outline: none; cursor: pointer;
+}}
+.size-slider::-webkit-slider-thumb {{
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #7d9b6a; cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}}
+.showing-count {{ font-size: 0.77rem; color: #b0a090; white-space: nowrap; margin-left: auto; }}
+
+/* ---- Grid ---- */
+.main {{ padding: 20px; }}
+.grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--thumb-size,260px), 1fr));
+  gap: 14px;
+}}
+
+/* ---- Card ---- */
+.card {{
+  background: #fff; border: 1.5px solid #ece5dd;
+  border-radius: 14px; overflow: hidden;
+  transition: box-shadow 0.2s, transform 0.15s, border-color 0.2s;
+}}
+.card:hover {{ box-shadow: 0 6px 28px rgba(61,53,48,0.10); transform: translateY(-2px); }}
+.card.is-adopted {{
+  border-color: #7d9b6a;
+  box-shadow: 0 0 0 2px rgba(125,155,106,0.18), 0 4px 16px rgba(125,155,106,0.12);
+}}
+.thumb-wrap {{
+  position: relative; aspect-ratio: 3/2;
+  overflow: hidden; background: #f0ebe4; cursor: zoom-in;
+}}
+.thumb-wrap img {{
+  width: 100%; height: 100%; object-fit: cover;
+  display: block; transition: transform 0.3s;
+}}
+.card:hover .thumb-wrap img {{ transform: scale(1.025); }}
+
+.adopt-btn {{
+  position: absolute; top: 8px; right: 8px;
+  width: 34px; height: 34px; border-radius: 50%;
+  border: none; cursor: pointer;
+  background: rgba(255,255,255,0.88);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1rem; font-weight: 700;
+  transition: all 0.2s; backdrop-filter: blur(4px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  color: #9d8e85; opacity: 0;
+}}
+.card:hover .adopt-btn, .card.is-adopted .adopt-btn {{ opacity: 1; }}
+.adopt-btn:hover {{ transform: scale(1.12); }}
+.card.is-adopted .adopt-btn {{
+  background: #7d9b6a; color: #fff;
+  box-shadow: 0 2px 8px rgba(125,155,106,0.4);
+}}
+.gid-badge {{
+  position: absolute; bottom: 7px; left: 8px;
+  padding: 2px 8px; border-radius: 8px;
+  background: rgba(0,0,0,0.38); backdrop-filter: blur(4px);
+  font-size: 0.62rem; color: rgba(255,255,255,0.85);
+}}
+
+.card-body {{ padding: 10px 12px 12px; }}
+.card-name {{
+  font-size: 0.7rem; color: #b0a090;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-bottom: 8px;
+}}
+
+/* レーティング */
+.ratings-row {{ display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }}
+.cam-block, .cli-block {{ display: flex; align-items: center; gap: 4px; }}
+.rating-label {{ font-size: 0.62rem; color: #b0a090; white-space: nowrap; }}
+.cam-stars {{ color: #c8a45d; font-size: 0.9rem; letter-spacing: 1px; }}
+.rating-sep {{ color: #ddd5cc; font-size: 0.6rem; }}
+.star-picker {{ display: flex; gap: 1px; }}
+.star-pick-btn {{
+  background: none; border: none; cursor: pointer;
+  font-size: 1.05rem; padding: 0 1px; line-height: 1;
+  color: #d8d0c8; transition: color 0.1s, transform 0.1s;
+}}
+.star-pick-btn:hover {{ transform: scale(1.25); }}
+.star-pick-btn.on {{ color: #7d9b6a; }}
+.star-reset-btn {{
+  background: none; border: none; cursor: pointer;
+  font-size: 0.65rem; color: #c0b0a0; padding: 0 2px;
+  transition: color 0.1s;
+}}
+.star-reset-btn:hover {{ color: #9d8e85; }}
+
+/* タグ */
+.tags-row {{ display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 7px; min-height: 22px; }}
+.tag {{
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 8px; border-radius: 10px;
+  background: #f0ebe4; border: 1px solid #ddd5c8;
+  font-size: 0.67rem; color: #7d6e65; cursor: pointer;
+  transition: all 0.15s;
+}}
+.tag:hover {{ background: #fae8e0; border-color: #d0b8a8; }}
+.tag-x {{ font-size: 0.6rem; color: #c0b0a0; }}
+.add-tag-btn {{
+  padding: 2px 8px; border-radius: 10px;
+  background: transparent; border: 1px dashed #c8b8a8;
+  font-size: 0.67rem; color: #c0b0a0; cursor: pointer;
+  transition: all 0.15s;
+}}
+.add-tag-btn:hover {{ border-color: #7d9b6a; color: #7d9b6a; background: rgba(125,155,106,0.06); }}
+
+/* メモ */
+.note-field {{
+  width: 100%; padding: 5px 8px;
+  border: 1px solid #ece5dd; border-radius: 7px;
+  background: #faf8f5; font-size: 0.72rem;
+  font-family: inherit; color: #3d3530;
+  resize: none; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  line-height: 1.45; min-height: 36px;
+}}
+.note-field:focus {{ border-color: #7d9b6a; box-shadow: 0 0 0 2px rgba(125,155,106,0.10); }}
+.note-field::placeholder {{ color: #c8b8a8; font-style: italic; }}
+
+/* ---- 写真モーダル ---- */
+.modal {{
+  display: none; position: fixed; inset: 0;
+  background: rgba(30,22,18,0.90); z-index: 1000;
+  align-items: center; justify-content: center;
+  flex-direction: column; gap: 14px; cursor: zoom-out;
+}}
+.modal.open {{ display: flex; }}
+.modal-img {{
+  max-width: 92vw; max-height: 84vh;
+  border-radius: 8px; box-shadow: 0 12px 48px rgba(0,0,0,0.5);
+  object-fit: contain;
+}}
+.modal-footer {{
+  display: flex; align-items: center; gap: 16px;
+  flex-wrap: wrap; justify-content: center;
+}}
+.modal-name {{ color: #c8b8a8; font-size: 0.82rem; }}
+.modal-close {{
+  position: absolute; top: 14px; right: 18px;
+  background: none; border: none;
+  color: #a09080; font-size: 2rem; cursor: pointer;
+  line-height: 1; transition: color 0.15s;
+}}
+.modal-close:hover {{ color: #f8f5f0; }}
+.modal-adopt-btn {{
+  padding: 8px 20px; border-radius: 20px;
+  border: 2px solid #7d9b6a; background: transparent;
+  color: #7d9b6a; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+  transition: all 0.2s;
+}}
+.modal-adopt-btn.on, .modal-adopt-btn:hover {{ background: #7d9b6a; color: #fff; }}
+
+/* ---- タグモーダル ---- */
+.tag-modal {{
+  display: none; position: fixed; inset: 0;
+  background: rgba(30,22,18,0.70); z-index: 1100;
+  align-items: center; justify-content: center;
+}}
+.tag-modal.open {{ display: flex; }}
+.tag-modal-box {{
+  background: #fff; border-radius: 16px;
+  padding: 22px 24px; width: 360px; max-width: 92vw;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.2);
+}}
+.tag-modal-title {{ font-size: 0.9rem; font-weight: 700; color: #3d3530; margin-bottom: 14px; }}
+.tag-presets {{ display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }}
+.tag-preset-btn {{
+  padding: 5px 12px; border-radius: 14px;
+  border: 1.5px solid #ddd5cc; background: transparent;
+  font-size: 0.78rem; color: #7d6e65; cursor: pointer;
+  transition: all 0.15s;
+}}
+.tag-preset-btn:hover {{ border-color: #7d9b6a; color: #7d9b6a; }}
+.tag-preset-btn.on {{ background: #7d9b6a; border-color: #7d9b6a; color: #fff; }}
+.tag-custom-row {{ display: flex; gap: 6px; margin-bottom: 14px; }}
+.tag-custom-input {{
+  flex: 1; padding: 7px 10px;
+  border: 1.5px solid #ddd5cc; border-radius: 8px;
+  font-size: 0.82rem; color: #3d3530; outline: none;
+  transition: border-color 0.15s;
+}}
+.tag-custom-input:focus {{ border-color: #7d9b6a; }}
+.tag-custom-input::placeholder {{ color: #c0b0a0; }}
+.tag-add-custom {{
+  padding: 7px 14px; border-radius: 8px;
+  border: none; background: #7d9b6a; color: #fff;
+  font-size: 0.82rem; font-weight: 600; cursor: pointer;
+  transition: background 0.15s;
+}}
+.tag-add-custom:hover {{ background: #6a8a58; }}
+.tag-modal-actions {{ display: flex; justify-content: flex-end; }}
+.tag-modal-close {{
+  padding: 7px 18px; border-radius: 8px;
+  border: 1.5px solid #ddd5cc; background: transparent;
+  color: #7d6e65; font-size: 0.82rem; cursor: pointer;
+}}
+.tag-modal-close:hover {{ border-color: #c0b0a0; }}
+
+/* ---- コレクションパネル ---- */
+.coll-panel {{
+  position: fixed; bottom: 20px; right: 20px;
+  background: rgba(255,255,255,0.96); backdrop-filter: blur(8px);
+  border: 1.5px solid #e5ddd5; border-radius: 14px;
+  padding: 14px 16px; min-width: 180px;
+  box-shadow: 0 6px 24px rgba(61,53,48,0.10); z-index: 100;
+}}
+.coll-title {{ font-size: 0.72rem; font-weight: 700; color: #7d9b6a; margin-bottom: 10px; letter-spacing: 0.04em; text-transform: uppercase; }}
+.coll-rows {{ display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }}
+.coll-row {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; cursor: pointer; padding: 2px 0; }}
+.coll-tag {{ font-size: 0.72rem; color: #7d6e65; }}
+.coll-n {{ font-size: 0.78rem; font-weight: 700; color: #3d3530; }}
+.coll-row:hover .coll-tag {{ color: #7d9b6a; }}
+.export-list-btn {{
+  display: block; width: 100%;
+  padding: 7px 12px; border-radius: 8px;
+  border: 1.5px solid #7d9b6a; background: transparent;
+  color: #7d9b6a; font-size: 0.78rem; font-weight: 600;
+  cursor: pointer; text-align: center; transition: all 0.15s;
+}}
+.export-list-btn:hover {{ background: #7d9b6a; color: #fff; }}
+
+@media (max-width: 640px) {{
+  .header {{ padding: 12px 14px 10px; }}
+  .main {{ padding: 12px; }}
+  .grid {{ gap: 10px; }}
+  .coll-panel {{ display: none; }}
+}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-top">
+    <div class="site-title">
+      {title}{sess_date_html}
+    </div>
+    <div class="adopt-counter">
+      <span class="n" id="adopt-count">0</span>
+      <span class="lbl">枚採用</span>
+    </div>
+  </div>
+  <div class="controls">
+    <div class="search-wrap">
+      <span class="search-icon">🔍</span>
+      <input class="search-box" id="search-box" type="search"
+             placeholder="ファイル名 / タグ / メモ…"
+             oninput="onSearch(this.value)">
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">絞り込み</span>
+      <select class="filter-select" id="filter-op" onchange="onFilterChange()">
+        <option value="all">すべて ({n_total}枚)</option>
+        <option value="eq3">★★★ のみ</option>
+        <option value="eq2">★★ のみ</option>
+        <option value="eq1">★ のみ</option>
+        <option value="gte2">★★ 以上</option>
+        <option value="adopted">採用済みのみ</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">並び替え</span>
+      <select class="sort-select" id="sort-select" onchange="onSortChange()">
+        <option value="dt_asc">撮影時刻 ↑</option>
+        <option value="dt_desc">撮影時刻 ↓</option>
+        <option value="cr_desc">撮影者レーティング ↓</option>
+        <option value="cr_asc">撮影者レーティング ↑</option>
+        <option value="cl_desc">あなたのレーティング ↓</option>
+        <option value="cl_asc">あなたのレーティング ↑</option>
+      </select>
+    </div>
+    <div class="size-row">
+      <span>🖼 サイズ</span>
+      <input class="size-slider" id="size-slider" type="range"
+             min="160" max="420" step="20" value="260"
+             oninput="onSizeChange(this.value)">
+    </div>
+    <span class="showing-count" id="showing-count">{n_total} 枚</span>
+  </div>
+</div>
+
+<div class="main">
+  <div class="grid" id="grid"></div>
+</div>
+
+<!-- 写真モーダル -->
+<div class="modal" id="modal" onclick="closeModal(event)">
+  <button class="modal-close" onclick="closeModal()">&#x2715;</button>
+  <img class="modal-img" id="modal-img" src="" alt="">
+  <div class="modal-footer">
+    <span class="modal-name" id="modal-name"></span>
+    <button class="modal-adopt-btn" id="modal-adopt-btn" onclick="toggleAdoptModal()">採用する</button>
+  </div>
+</div>
+
+<!-- タグモーダル -->
+<div class="tag-modal" id="tag-modal" onclick="closeTagModalOverlay(event)">
+  <div class="tag-modal-box">
+    <div class="tag-modal-title" id="tag-modal-title">タグを編集</div>
+    <div class="tag-presets" id="tag-presets"></div>
+    <div class="tag-custom-row">
+      <input class="tag-custom-input" id="tag-custom-input"
+             placeholder="カスタムタグを追加…"
+             onkeydown="if(event.key==='Enter')addCustomTag()">
+      <button class="tag-add-custom" onclick="addCustomTag()">追加</button>
+    </div>
+    <div class="tag-modal-actions">
+      <button class="tag-modal-close" onclick="closeTagModal()">閉じる</button>
+    </div>
+  </div>
+</div>
+
+<!-- コレクションパネル -->
+<div class="coll-panel" id="coll-panel">
+  <div class="coll-title">コレクション</div>
+  <div class="coll-rows" id="coll-rows">
+    <div style="font-size:0.72rem;color:#c0b0a0">タグなし</div>
+  </div>
+  <button class="export-list-btn" onclick="exportList()">採用リストを出力</button>
+</div>
+
+<script>
+/* ---- Data ---- */
+const PHOTOS = {photos_json};
+const PRESET_TAGS = {preset_tags};
+const _FILE = window.location.pathname.split('/').pop() || 'client.html';
+const STORE = 'asa-client2-' + _FILE;
+
+/* ---- State ---- */
+let S = {{
+  ratings: {{}},
+  adopted: {{}},
+  tags: {{}},
+  notes: {{}},
+  ui: {{ filter_op: 'all', sort: 'dt_asc', thumb_size: 260, search: '' }}
+}};
+
+function save() {{ try {{ localStorage.setItem(STORE, JSON.stringify(S)); }} catch(e) {{}} }}
+function load() {{
+  try {{
+    const raw = localStorage.getItem(STORE);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    if (d.ratings) S.ratings = d.ratings;
+    if (d.adopted)  S.adopted  = d.adopted;
+    if (d.tags)     S.tags     = d.tags;
+    if (d.notes)    S.notes    = d.notes;
+    if (d.ui)       Object.assign(S.ui, d.ui);
+  }} catch(e) {{}}
+}}
+
+/* ---- 有効レーティング (クライアント設定 > 撮影者) ---- */
+function effRating(stem) {{
+  const cr = S.ratings[stem];
+  if (cr !== undefined && cr !== null) return cr;
+  const p = PHOTOS.find(x => x.stem === stem);
+  return p ? (p.cr || 0) : 0;
+}}
+
+/* ---- フィルタ・ソート ---- */
+function filterAndSort() {{
+  const op = S.ui.filter_op;
+  const q  = S.ui.search.toLowerCase().trim();
+
+  let list = PHOTOS.filter(p => {{
+    const r = effRating(p.stem);
+    if (op === 'eq1' && r !== 1) return false;
+    if (op === 'eq2' && r !== 2) return false;
+    if (op === 'eq3' && r !== 3) return false;
+    if (op === 'gte2' && r < 2)  return false;
+    if (op === 'adopted' && !S.adopted[p.stem]) return false;
+    if (q) {{
+      const inStem = p.stem.toLowerCase().includes(q);
+      const inTags = (S.tags[p.stem] || []).some(t => t.toLowerCase().includes(q));
+      const inNote = (S.notes[p.stem] || '').toLowerCase().includes(q);
+      if (!inStem && !inTags && !inNote) return false;
+    }}
+    return true;
+  }});
+
+  const sort = S.ui.sort;
+  list.sort((a, b) => {{
+    if (sort === 'dt_asc')  return a.dt < b.dt ? -1 : a.dt > b.dt ? 1 : 0;
+    if (sort === 'dt_desc') return b.dt < a.dt ? -1 : b.dt > a.dt ? 1 : 0;
+    if (sort === 'cr_asc')  return a.cr !== b.cr ? a.cr - b.cr : (a.dt < b.dt ? -1 : 1);
+    if (sort === 'cr_desc') return a.cr !== b.cr ? b.cr - a.cr : (a.dt < b.dt ? -1 : 1);
+    const ca = effRating(a.stem), cb = effRating(b.stem);
+    if (sort === 'cl_asc')  return ca !== cb ? ca - cb : (a.dt < b.dt ? -1 : 1);
+    if (sort === 'cl_desc') return ca !== cb ? cb - ca : (a.dt < b.dt ? -1 : 1);
+    return 0;
+  }});
+  return list;
+}}
+
+/* ---- カードレンダリング ---- */
+function renderCard(p) {{
+  const er   = effRating(p.stem);
+  const isAd = !!S.adopted[p.stem];
+  const tags = S.tags[p.stem] || [];
+  const note = (S.notes[p.stem] || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const se   = p.stem.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+
+  const camH = p.cr > 0
+    ? '<span class="cam-stars">' + '★'.repeat(p.cr) + '</span>'
+    : '<span class="cam-stars" style="color:#d8d0c8">—</span>';
+
+  let pickH = '';
+  for (let i = 1; i <= 3; i++) {{
+    pickH += `<button class="star-pick-btn ${{er >= i ? 'on' : ''}}" onclick="setRating('${{se}}',${{i}})" title="${{i}}★">★</button>`;
+  }}
+  if (er > 0) pickH += `<button class="star-reset-btn" onclick="setRating('${{se}}',0)" title="リセット">✕</button>`;
+
+  const tagsH = tags.map(t => {{
+    const te = t.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/</g,'&lt;');
+    return `<span class="tag" onclick="removeTag('${{se}}','${{te}}')">${{t}} <span class="tag-x">×</span></span>`;
+  }}).join('') + `<button class="add-tag-btn" onclick="openTagModal('${{se}}')">+ タグ</button>`;
+
+  const dt = p.dt ? p.dt.slice(11, 16) : '';
+
+  return `<div class="card ${{isAd ? 'is-adopted' : ''}}" id="card-${{p.stem}}">
+  <div class="thumb-wrap" onclick="openModal('${{p.url}}','${{se}}')">
+    <img src="${{p.url}}" alt="${{p.stem}}" loading="lazy">
+    <button class="adopt-btn" onclick="toggleAdopt(event,'${{se}}')" title="${{isAd ? '採用解除' : '採用する'}}">${{isAd ? '✓' : '○'}}</button>
+    <div class="gid-badge">G${{p.gid}} ${{dt}}</div>
+  </div>
+  <div class="card-body">
+    <div class="card-name">${{p.stem}}</div>
+    <div class="ratings-row">
+      <div class="cam-block"><span class="rating-label">撮影者</span>${{camH}}</div>
+      <span class="rating-sep">◆</span>
+      <div class="cli-block">
+        <span class="rating-label" style="color:#7d9b6a">あなた</span>
+        <div class="star-picker">${{pickH}}</div>
+      </div>
+    </div>
+    <div class="tags-row" id="tags-${{p.stem}}">${{tagsH}}</div>
+    <textarea class="note-field" placeholder="メモ…" rows="1"
+      onchange="setNote('${{se}}',this.value)"
+      onfocus="this.rows=3" onblur="if(!this.value.trim())this.rows=1"
+    >${{note}}</textarea>
+  </div>
+</div>`;
+}}
+
+function renderGrid() {{
+  const filtered = filterAndSort();
+  document.getElementById('grid').innerHTML = filtered.map(renderCard).join('');
+  document.getElementById('showing-count').textContent = filtered.length + ' / ' + PHOTOS.length + ' 枚';
+  updateAdoptCounter();
+  updateCollPanel();
+}}
+
+/* ---- 採用 ---- */
+window.toggleAdopt = function(e, stem) {{
+  if (e) e.stopPropagation();
+  S.adopted[stem] = !S.adopted[stem];
+  save(); updateCard(stem); updateAdoptCounter(); updateCollPanel();
+}};
+function updateAdoptCounter() {{
+  document.getElementById('adopt-count').textContent =
+    Object.values(S.adopted).filter(Boolean).length;
+}}
+
+/* ---- レーティング ---- */
+window.setRating = function(stem, val) {{
+  if (val === 0 || S.ratings[stem] === val) delete S.ratings[stem];
+  else S.ratings[stem] = val;
+  save(); updateCard(stem);
+  if (S.ui.filter_op !== 'all') renderGrid();
+}};
+
+/* ---- タグ ---- */
+let _tagStem = null;
+window.openTagModal = function(stem) {{
+  _tagStem = stem;
+  const cur = S.tags[stem] || [];
+  document.getElementById('tag-modal-title').textContent = stem + ' — タグ編集';
+  document.getElementById('tag-presets').innerHTML = PRESET_TAGS.map(t => {{
+    const on = cur.includes(t);
+    const te = t.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<button class="tag-preset-btn ${{on ? 'on' : ''}}" onclick="togglePresetTag('${{te}}')">${{on ? '✓ ' : ''}}${{t}}</button>`;
+  }}).join('');
+  document.getElementById('tag-custom-input').value = '';
+  document.getElementById('tag-modal').classList.add('open');
+}};
+window.closeTagModal = function() {{
+  document.getElementById('tag-modal').classList.remove('open');
+  _tagStem = null;
+}};
+window.closeTagModalOverlay = function(e) {{
+  if (e.target === document.getElementById('tag-modal')) window.closeTagModal();
+}};
+window.togglePresetTag = function(tag) {{
+  if (!_tagStem) return;
+  const cur = S.tags[_tagStem] || [];
+  const idx = cur.indexOf(tag);
+  if (idx >= 0) cur.splice(idx, 1); else cur.push(tag);
+  S.tags[_tagStem] = cur;
+  save(); updateCard(_tagStem); window.openTagModal(_tagStem);
+}};
+window.addCustomTag = function() {{
+  if (!_tagStem) return;
+  const input = document.getElementById('tag-custom-input');
+  const tag = input.value.trim();
+  if (!tag) return;
+  const cur = S.tags[_tagStem] || [];
+  if (!cur.includes(tag)) {{ cur.push(tag); S.tags[_tagStem] = cur; save(); updateCard(_tagStem); }}
+  input.value = '';
+  window.openTagModal(_tagStem);
+}};
+window.removeTag = function(stem, tag) {{
+  const cur = S.tags[stem] || [];
+  const idx = cur.indexOf(tag);
+  if (idx >= 0) {{ cur.splice(idx, 1); save(); updateCard(stem); updateCollPanel(); }}
+}};
+
+/* ---- メモ ---- */
+window.setNote = function(stem, val) {{
+  if (val.trim()) S.notes[stem] = val; else delete S.notes[stem];
+  save();
+}};
+
+/* ---- カード個別更新 ---- */
+function updateCard(stem) {{
+  const el = document.getElementById('card-' + stem);
+  if (!el) return;
+  const p = PHOTOS.find(x => x.stem === stem);
+  if (p) el.outerHTML = renderCard(p);
+}}
+
+/* ---- UI制御 ---- */
+window.onSearch = function(val) {{ S.ui.search = val; save(); renderGrid(); }};
+window.onFilterChange = function() {{
+  S.ui.filter_op = document.getElementById('filter-op').value;
+  save(); renderGrid();
+}};
+window.onSortChange = function() {{
+  S.ui.sort = document.getElementById('sort-select').value;
+  save(); renderGrid();
+}};
+window.onSizeChange = function(val) {{
+  S.ui.thumb_size = parseInt(val, 10);
+  document.documentElement.style.setProperty('--thumb-size', val + 'px');
+  save();
+}};
+
+/* ---- 写真モーダル ---- */
+let _modalStem = null;
+window.openModal = function(url, stem) {{
+  _modalStem = stem;
+  document.getElementById('modal-img').src = url;
+  document.getElementById('modal-name').textContent = stem;
+  const btn = document.getElementById('modal-adopt-btn');
+  const isAd = !!S.adopted[stem];
+  btn.textContent = isAd ? '採用解除' : '採用する';
+  btn.classList.toggle('on', isAd);
+  document.getElementById('modal').classList.add('open');
+}};
+window.closeModal = function(e) {{
+  if (e && !e.target.classList.contains('modal') && !e.target.classList.contains('modal-close')) return;
+  document.getElementById('modal').classList.remove('open');
+  document.getElementById('modal-img').src = '';
+  _modalStem = null;
+}};
+window.toggleAdoptModal = function() {{
+  if (!_modalStem) return;
+  window.toggleAdopt(null, _modalStem);
+  const btn = document.getElementById('modal-adopt-btn');
+  const isAd = !!S.adopted[_modalStem];
+  btn.textContent = isAd ? '採用解除' : '採用する';
+  btn.classList.toggle('on', isAd);
+}};
+
+/* ---- コレクションパネル ---- */
+function updateCollPanel() {{
+  const tagCounts = {{}};
+  Object.values(S.tags).forEach(tags => tags.forEach(t => {{
+    tagCounts[t] = (tagCounts[t] || 0) + 1;
+  }}));
+  const el = document.getElementById('coll-rows');
+  if (Object.keys(tagCounts).length === 0) {{
+    el.innerHTML = '<div style="font-size:0.72rem;color:#c0b0a0">タグなし</div>';
+    return;
+  }}
+  el.innerHTML = Object.entries(tagCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, n]) => {{
+      const te = t.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+      return `<div class="coll-row" onclick="filterByTag('${{te}}')"><span class="coll-tag">${{t}}</span><span class="coll-n">${{n}}</span></div>`;
+    }}).join('');
+}}
+window.filterByTag = function(tag) {{
+  S.ui.search = tag;
+  document.getElementById('search-box').value = tag;
+  save(); renderGrid();
+}};
+
+/* ---- 採用リスト出力 ---- */
+window.exportList = function() {{
+  const adopted = PHOTOS.filter(p => S.adopted[p.stem]);
+  if (!adopted.length) {{ alert('採用フラグが付いた写真がありません'); return; }}
+  const lines = ['採用リスト', '', '採用数: ' + adopted.length + ' 枚', ''];
+  adopted.forEach(p => {{
+    lines.push(p.stem);
+    const r = effRating(p.stem);
+    if (r > 0) lines.push('  レーティング: ' + r + '★');
+    const tags = (S.tags[p.stem] || []).join(', ');
+    if (tags) lines.push('  タグ: ' + tags);
+    const note = S.notes[p.stem] || '';
+    if (note) lines.push('  メモ: ' + note);
+    lines.push('');
+  }});
+  const blob = new Blob([lines.join('\\n')], {{type: 'text/plain;charset=utf-8'}});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'adopted_list.txt';
+  a.click();
+}};
+
+/* ---- キーボード ---- */
+document.addEventListener('keydown', e => {{
+  if (e.key === 'Escape') {{ window.closeModal(); window.closeTagModal(); }}
+}});
+
+/* ---- 初期化 ---- */
+load();
+document.getElementById('filter-op').value  = S.ui.filter_op  || 'all';
+document.getElementById('sort-select').value = S.ui.sort       || 'dt_asc';
+document.getElementById('size-slider').value = S.ui.thumb_size || 260;
+document.getElementById('search-box').value  = S.ui.search     || '';
+document.documentElement.style.setProperty('--thumb-size', (S.ui.thumb_size || 260) + 'px');
+renderGrid();
+</script>
+</body>
+</html>'''
+
+
 # ---------- Flaskサーバー ----------
 
 def _recalc_technical_score(row: dict, w: dict) -> float:
@@ -1889,6 +2646,8 @@ def main() -> None:
                         help='セッションファイルのPIDを読んでサーバーを停止')
     parser.add_argument('--port', type=int, default=5002,
                         help='Flaskサーバーポート番号 (デフォルト: 5002)')
+    parser.add_argument('--client', action='store_true',
+                        help='クライアント向け 2nd セレクトツールを生成する')
     args = parser.parse_args()
 
     # --stop
@@ -1986,6 +2745,17 @@ def main() -> None:
     output_path = Path(args.output)
     if not output_path.is_absolute():
         output_path = csv_path.parent / output_path
+
+    if args.client:
+        client_output = output_path.parent / (output_path.stem + '_client' + output_path.suffix) \
+            if args.output != 'stage2_report.html' else csv_path.parent / 'stage2_client.html'
+        html_str = generate_client_html(rows, jpeg_dir, session_info)
+        client_output.write_text(html_str, encoding='utf-8')
+        n_groups = max(r['group_id'] for r in rows) + 1
+        print(f'クライアントレポート生成完了: {client_output}')
+        print(f'グループ数: {n_groups} / ショット数: {len(rows)}')
+        print(f'\n  open "{client_output}"')
+        sys.exit(0)
 
     html_str = generate_html(rows, jpeg_dir, session_info)
     output_path.write_text(html_str, encoding='utf-8')
